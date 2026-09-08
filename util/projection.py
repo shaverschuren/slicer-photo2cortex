@@ -15,6 +15,12 @@ class Projection:
     Supports orthographic and perspective projection and automatically updates when
     the associated transform changes.
 
+    Projective geometry is owned by the reference-photo coordinate system: the
+    plane, transform, camera model, slab thickness, and cortex mapping define the
+    shared reference-grid geometry. Secondary photographs can later be warped into
+    the same reference grid and sampled through this same projection without
+    creating independent 3D transforms.
+
     Usage:
         proj = Projection(
             modelNode, photoVolumeNode, transformNode,
@@ -124,6 +130,18 @@ class Projection:
     # -------------------------------------------------------------------------
     # Core projection logic
     # -------------------------------------------------------------------------
+    def set_reference_image(self, photoVolumeNode):
+        """Bind a different reference-grid image to the existing geometry.
+
+        This keeps the same plane transform and cortex projection geometry while
+        allowing another image already expressed in the reference-photo coordinate
+        system to be sampled. The actual math remains the same as the original
+        photo→cortex projection.
+        """
+        self.photoVolumeNode = photoVolumeNode
+        self._prepare_data()
+        self.update()
+
     def _update_projection(self, caller=None, event=None):
         """Observer callback."""
         self.update()
