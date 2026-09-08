@@ -23,6 +23,7 @@ Features:
 
 import os
 import sys
+import json
 import argparse
 import slicer
 import numpy as np
@@ -30,6 +31,19 @@ import vtk
 import nibabel as nib
 import util
 from NiBabelModelIO import VolGeom  # type: ignore
+
+
+def load_photo_set_manifest(photo_set_manifest_path):
+    """Load a patient photo-set manifest for multi-photo workflows.
+
+    The reference image remains the only photo used for manual cortex alignment;
+    secondary photographs are represented as metadata and may optionally be
+    transformed into reference coordinates later.
+    """
+    if not photo_set_manifest_path or not os.path.exists(photo_set_manifest_path):
+        return None
+    with open(photo_set_manifest_path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 def read_fs_surf(path, modelNode, calculateNormals=True):
     """
@@ -344,7 +358,7 @@ def setup_interactive_photo_plane(planeNode, envelopeNode, offset_mm=5.0):
 
     return transformObserver, transformNode
 
-def main(t1_path, ribbon_path, lh_pial_path, rh_pial_path, lh_envelope_path, rh_envelope_path, brain_envelope_path, photo_path, mask_path, output_dir, create_envelope_mode=False):
+def main(t1_path, ribbon_path, lh_pial_path, rh_pial_path, lh_envelope_path, rh_envelope_path, brain_envelope_path, photo_path, mask_path, output_dir, create_envelope_mode=False, photo_set_manifest=None):
     """
     Main execution function for photo-to-MRI registration in 3D Slicer.
     
@@ -377,6 +391,18 @@ def main(t1_path, ribbon_path, lh_pial_path, rh_pial_path, lh_envelope_path, rh_
     create_envelope_mode : bool, optional
         If True, only creates envelopes and exits. Defaults to False
     """
+
+    manifest = load_photo_set_manifest(photo_set_manifest) if photo_set_manifest else None
+    if manifest is not None:
+        photo_path = photo_path or next(
+            (
+                photo["path"] if isinstance(photo, dict) and "path" in photo else None
+                for photo in manifest.get("photos", [])
+                if str(photo.get("role", "")).lower() == "reference"
+            ),
+            photo_path,
+        )
+        print(f"[PhotoSet] Loaded manifest for patient '{manifest.get('patient_id')}'. Reference photo: {photo_path}")
 
     # On startup, set layout to 3D view only and open Models module and Python console
     if not create_envelope_mode:
@@ -504,6 +530,7 @@ if __name__ == "__main__":
     parser.add_argument("--photo_path", type=str, help="Path to intraoperative photograph")
     parser.add_argument("--mask_path", type=str, help="Path to photo masks .npz file")
     parser.add_argument("--output_dir", type=str, help="Path to output directory")
+    parser.add_argument("--photo_set_manifest", type=str, help="Optional patient photo-set manifest; reference photo is used for manual cortex alignment")
     parser.add_argument("--create_envelope_mode", action="store_true", help="Flag to enable envelope creation loop")
     args = parser.parse_args()
 
