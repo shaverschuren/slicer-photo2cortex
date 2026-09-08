@@ -1,8 +1,8 @@
 """
-res_pic2mri
+photo2cortex
 ===========
 
-Utilities and scripts for streamlined manual registration of intraoperative resection photographs to MRI-derived cortical models in 3D Slicer.
+Utilities and scripts for registering photographs to MRI-derived cortical models in 3D Slicer.
 
 This package groups helper functions for:
 - `FreeSurfer` surface IO and envelope handling

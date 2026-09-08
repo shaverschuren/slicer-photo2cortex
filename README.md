@@ -177,7 +177,7 @@ import optimizer
 ## Project Structure
 
 ```
-res_pic2mri/
+photo2cortex/
 ├── __init__.py                 # Package initialization and documentation
 ├── config_template.yaml        # Configuration template
 ├── main_slicer_loop.py        # Main entry point for registration workflow
