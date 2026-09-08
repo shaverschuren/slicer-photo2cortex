@@ -1,13 +1,34 @@
 # Slicer Photo2Cortex
 
-Utilities and scripts for streamlined manual registration of intraoperative resection photographs to MRI-derived cortical models in 3D Slicer.
+Utilities and scripts for manual registration of intraoperative photographs to MRI-derived cortical models in 3D Slicer.
 
 ## Overview
 
-This package provides helper functions and automation scripts to facilitate the registration of intraoperative resection photographs to preoperative MRI scans. It leverages FreeSurfer surfaces, 3D Slicer's visualization capabilities, and MATLAB for envelope creation to enable precise spatial mapping of surgical photographs to brain anatomy.
+The core concept is a single reference photo per patient:
+
+```text
+                      secondary photo A
+                             |
+                             | 2D registration
+                             v
+MRI / FreeSurfer <---- reference photograph <---- secondary photo B
+       ^                    |
+       |                    |
+       +--- photo→cortex ---+
+```
+
+The reference photograph is the one manually aligned to the cortex. Every secondary photograph is first mapped into the reference-photo pixel coordinate system and then reuses the same reference-photo→cortex geometry.
+
+This architecture explicitly separates:
+
+- reference photo → cortex registration (manual, one per patient)
+- secondary photo → reference photo registration (feature-based projective registration)
+- optimizer.py, which remains a future reference-photo→cortex optimisation tool and is not the same as 2D photo-to-photo registration
 
 ### Key Features
 
+- **Reference-photo-first workflow**: exactly one photo defines the cortex geometry
+- **Secondary-photo routing**: secondary photos are registered into the reference-photo grid before cortex projection
 - **FreeSurfer Integration**: Surface IO and envelope handling for cortical models
 - **Interactive Photo Alignment**: Manual registration tools in 3D Slicer with transform controls
 - **Surface-to-Volume Projection**: Convert surface masks into volumetric representations
@@ -54,8 +75,8 @@ Additional dependencies (installed automatically when needed):
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/shaverschuren/res_pic2mri.git
-   cd res_pic2mri
+  git clone https://github.com/shaverschuren/slicer-photo2cortex.git
+  cd slicer-photo2cortex
    ```
 
 2. **Install Python dependencies**:
@@ -84,12 +105,12 @@ Before running the scripts, you need to configure the paths to your data and sof
    ```yaml
    slicer_exe_path: C:\Path\To\Slicer.exe
    mri_data_dir: C:\Path\To\FreeSurfer\Subjects\Directory
-   pic_data_dir: C:\Path\To\Photographs\Root\Directory
+  photo_data_dir: C:\Path\To\Photographs\Root\Directory
    ```
 
    - `slicer_exe_path`: Full path to the Slicer executable
-   - `mri_data_dir`: Root directory containing FreeSurfer subject folders (e.g., `RESP001`, `RESP002`, etc.)
-   - `pic_data_dir`: Root directory containing corresponding photograph folders
+   - `mri_data_dir`: Root directory containing FreeSurfer subject folders (e.g., `RESP0001`, `RESP0002`, etc.)
+  - `photo_data_dir`: Root directory containing corresponding photograph folders
 
 ## Usage
 
@@ -108,6 +129,33 @@ The typical workflow consists of two main steps:
    python main_slicer_loop.py
    ```
    This opens 3D Slicer for each patient to perform manual photo-to-MRI registration.
+
+### Photo set / reference workflow
+
+A patient may contain several images, but one photo is designated as the reference photo. It is the only photograph manually aligned to the cortical surface. Secondary photographs are not independently registered to cortex; instead they are mapped into the reference-photo image grid using a 2D transform, and then the same photo→cortex projection is reused.
+
+A patient photo set may be represented by a manifest such as:
+
+```yaml
+reference: pre_resection
+
+photos:
+  - id: pre_resection
+    path: pre_resection.jpg
+    role: reference
+
+  - id: grid_configuration_2
+    path: grid2.jpg
+    role: secondary
+    registration_method: projective_8dof
+
+  - id: post_resection
+    path: post_resection.jpg
+    role: secondary
+    registration_method: nonlinear
+```
+
+If a patient contains exactly one usable photograph and no manifest, that single photo is automatically treated as the reference photograph. If multiple photos are present and no reference is specified, the workflow stops with a clear error instead of guessing.
 
 ### Detailed Workflow
 
@@ -220,7 +268,7 @@ Your FreeSurfer subjects should be organized as:
 
 ```
 mri_data_dir/
-├── RESP001/
+├── RESP0001/
 │   ├── mri/
 │   │   └── T1.nii
 │   └── surf/
@@ -229,7 +277,7 @@ mri_data_dir/
 │       ├── lh_envelope.stl (generated)
 │       ├── rh_envelope.stl (generated)
 │       └── brain_envelope.stl (generated)
-├── RESP002/
+├── RESP0002/
 │   └── ...
 └── ...
 ```
@@ -237,10 +285,10 @@ mri_data_dir/
 Photographs should be organized with matching patient IDs:
 
 ```
-pic_data_dir/
-├── RESP001/
+photo_data_dir/
+├── RESP0001/
 │   └── photo.jpg (or similar)
-├── RESP002/
+├── RESP0002/
 │   └── photo.jpg
 └── ...
 ```
