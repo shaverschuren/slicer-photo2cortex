@@ -254,7 +254,7 @@ def load_anatomical_inputs(t1_path, ribbon_path, lh_pial_path, rh_pial_path, lh_
     rh_envelopeDisplayNode.SetVisibility(False)
     brain_envelopeDisplayNode.SetColor(0.0, 0.0, 1.0)
     brain_envelopeDisplayNode.SetOpacity(0.8)
-    brain_envelopeDisplayNode.SetVisibility(True)
+    brain_envelopeDisplayNode.SetVisibility(False)
 
     return t1Node, ribbonNode, lh_pialNode, rh_pialNode, lh_envelopeNode, rh_envelopeNode, brain_envelopeNode
 

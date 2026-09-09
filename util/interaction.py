@@ -684,7 +684,7 @@ def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transfo
             transformObserver._onModified()
 
             # Make projection and transformation interaction visible
-            Nodes['brain_envelopeNode'].GetDisplayNode().SetVisibility(True)
+            # Nodes['brain_envelopeNode'].GetDisplayNode().SetVisibility(True)
             setup_interactive_transform(Nodes['transformNode'], visibility=True, limit_to_surf_aligned=True)
 
         # Auto-align projection plane with "a" key
