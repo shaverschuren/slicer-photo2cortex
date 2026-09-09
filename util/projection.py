@@ -3,9 +3,9 @@ Photo projection onto 3D surfaces for 3D Slicer.
 """
 
 import numpy as np
-import vtk
-from vtkmodules.util import numpy_support
-import slicer
+import vtk  # type: ignore
+from vtkmodules.util import numpy_support  # type: ignore
+import slicer  # type: ignore
 from .geometry import subdivide_model
 
 
@@ -29,7 +29,8 @@ def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, 
     Returns
     -------
     tuple
-        (planeNode, flip) - The model node containing the plane and the VTK flip filter
+        (planeNode, texture_pipeline) - The model node and retained VTK
+        (extract-first-slice, flip-vertically) texture pipeline
     """
     # Create vtkPlaneSource
     plane = vtk.vtkPlaneSource()
@@ -52,11 +53,21 @@ def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, 
     displayNode.SetVisibility(False)
 
     # Texture assignment:
-    # flip image vertically (needed for correct orientation)
+    # keep only the first image slice; photo projection uses a 2D texture.
+    imageData = photoVolumeNode.GetImageData()
+    imageExtent = imageData.GetExtent()
+    extract = vtk.vtkExtractVOI()
+    extract.SetInputConnection(photoVolumeNode.GetImageDataConnection())
+    extract.SetVOI(
+        imageExtent[0], imageExtent[1], imageExtent[2], imageExtent[3],
+        imageExtent[4], imageExtent[4]
+    )
+    extract.Update()
+
+    # Flip image vertically (needed for correct orientation)
     flip = vtk.vtkImageFlip()
     flip.SetFilteredAxis(1)  # flip vertical axis
-    # Connect the photo volume image data
-    flip.SetInputConnection(photoVolumeNode.GetImageDataConnection())
+    flip.SetInputConnection(extract.GetOutputPort())
     flip.Update()
 
     # Connect the flipped image pipeline to model display as texture
@@ -65,7 +76,7 @@ def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, 
     # Naming note: the texture is referenced via the display node's connection (not saved as separate node)
     print("Created textured plane:", planeNode.GetName(), " (texture connected)")
 
-    return planeNode, flip
+    return planeNode, (extract, flip)
 
 
 class Projection:

@@ -24,9 +24,9 @@ import os
 import sys
 import json
 import argparse
-import slicer
+import slicer  # type: ignore
 import numpy as np
-import vtk
+import vtk  # type: ignore
 import nibabel as nib
 import util
 from NiBabelModelIO import VolGeom  # type: ignore
@@ -397,7 +397,7 @@ def main(t1_path, ribbon_path, lh_pial_path, rh_pial_path, lh_envelope_path, rh_
     plane_dims = (base_width, base_height)
 
     # Only the reference photo gets an interactively-manipulated plane/transform
-    referencePlaneNode, _flip = util.create_textured_plane(
+    referencePlaneNode, reference_texture_pipeline = util.create_textured_plane(
         referenceVolumeNode, planeName=f"PhotoPlane__{reference_photo_id}", width=base_width, height=base_height, opacity=0.6)
     Nodes["planeNode"] = referencePlaneNode
 
@@ -422,6 +422,7 @@ def main(t1_path, ribbon_path, lh_pial_path, rh_pial_path, lh_envelope_path, rh_
             photo_type=(reference_entry.get("photo_type") if reference_entry else "reference"),
             image_path=photo_path, volume_node=referenceVolumeNode, plane_node=referencePlaneNode,
             envelope_node=referenceEnvelopeNode, projection=MainProjection,
+            texture_pipeline=reference_texture_pipeline,
         )
     }
     photo_context = {

@@ -5,10 +5,10 @@ UI, camera, and interaction handling for 3D Slicer.
 import sys
 import os
 import numpy as np
-import vtk
+import vtk  # type: ignore
 import qt  # type: ignore
 import ctk  # type: ignore
-import slicer
+import slicer  # type: ignore
 import surf2vol
 import optimizer
 from .geometry import get_poly_normals, vtkMatrixToNumpy, numpyToVtkMatrix, extractRotationScale, rotationFromVectors, clone_model_node, load_photo_masks
@@ -430,7 +430,7 @@ def ensure_photo_projection_state(photo_id, role, photo_type, image_path, mask_p
     if mask_path:
         load_photo_masks(mask_path, volumeNode)
 
-    planeNode, _flip = create_textured_plane(
+    planeNode, texture_pipeline = create_textured_plane(
         volumeNode, planeName=f"PhotoPlane__{photo_id}", width=plane_dims[0], height=plane_dims[1], opacity=0.6
     )
     planeNode.SetAndObserveTransformNodeID(transformNode.GetID())
@@ -448,7 +448,8 @@ def ensure_photo_projection_state(photo_id, role, photo_type, image_path, mask_p
 
     state = PhotoProjectionState(
         photo_id=photo_id, role=role, photo_type=photo_type, image_path=image_path,
-        volume_node=volumeNode, plane_node=planeNode, envelope_node=envelopeNode, projection=projection
+        volume_node=volumeNode, plane_node=planeNode, envelope_node=envelopeNode,
+        projection=projection, texture_pipeline=texture_pipeline
     )
     photo_states[photo_id] = state
     return state

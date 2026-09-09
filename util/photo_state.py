@@ -22,6 +22,7 @@ class PhotoProjectionState:
     plane_node: Any
     envelope_node: Any
     projection: Any
+    texture_pipeline: Any = None
 
     @property
     def plane_node_name(self) -> str:
