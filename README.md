@@ -31,10 +31,13 @@ The workflow endpoint is a **complete set of photo-to-cortex projections** — o
 photo selection
   -> masking (outside ROI for every photo; resection ROI only for a post-resection photo)
   -> auxiliary-to-reference 2D registration
+  -> registration QC montage + explicit human approval
   -> one manual reference-to-cortex registration
   -> projection of all photos (one persistent projected envelope each)
   -> optional post-resection surf2vol
 ```
+
+Registration QC is persisted in the per-photo manifest state. Unchanged cached registrations keep their prior approval; newly computed results are marked as `pending` again until the user explicitly approves or rejects them.
 
 ### Key Features
 

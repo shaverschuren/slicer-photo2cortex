@@ -14,7 +14,8 @@ import photo_preparation
 import yaml
 from tqdm import tqdm
 
-from util.photo_registration import register_photo_set
+from util.photo_registration import register_photo_set, registration_qc_is_approved
+from util.photo_registration_qc import create_registration_qc_montage, review_registration_qc
 from util.projection_manifest import PROJECTION_MANIFEST_FILENAME, projection_set_is_complete
 
 
@@ -245,6 +246,40 @@ def process_subject(
     pending_photos = [result.moving_photo_id for result in registration_results if result.status != "registered"]
     if pending_photos:
         tqdm.write(f"Registration pending/failed for: {', '.join(pending_photos)}. These photos will not receive a projected envelope until registered.")
+
+    selected_auxiliaries = [photo for photo in photo_set.all_photos()[1:] if photo.registration_status in {"registered", "registration_pending", "pending"}]
+    if selected_auxiliaries:
+        unregistered = [photo.photo_id for photo in selected_auxiliaries if photo.registration_status != "registered"]
+        if unregistered:
+            tqdm.write(f"Registration incomplete for: {', '.join(unregistered)}. Cannot continue to Slicer.")
+            photo_preparation.save_photo_set_manifest(photo_set, photo_set_manifest_path)
+            return SubjectProcessStatus.FAILED
+
+        if not registration_qc_is_approved(photo_set):
+            qc_path = os.path.join(registration_dir, "registration_qc.png")
+            photo_set.registration_qc["montage_path"] = qc_path
+            if not os.path.exists(qc_path):
+                create_registration_qc_montage(photo_set, registration_results, qc_path)
+            if os.path.exists(qc_path):
+                decision = review_registration_qc(qc_path, photo_set, registration_results)
+                photo_set.registration_qc["montage_path"] = qc_path
+                photo_preparation.save_photo_set_manifest(photo_set, photo_set_manifest_path)
+                if decision == "approved":
+                    tqdm.write("Registration QC approved for current auxiliary registrations.")
+                elif decision == "rejected":
+                    tqdm.write("Registration QC rejected; subject will not continue to Slicer.")
+                    return SubjectProcessStatus.FAILED
+                else:
+                    tqdm.write("Registration QC was not explicitly approved; subject will not continue to Slicer.")
+                    return SubjectProcessStatus.FAILED
+            else:
+                tqdm.write("Registration QC montage could not be generated; subject will not continue to Slicer.")
+                photo_preparation.save_photo_set_manifest(photo_set, photo_set_manifest_path)
+                return SubjectProcessStatus.FAILED
+        else:
+            tqdm.write("Registration QC already approved; reusing cached registrations.")
+            photo_set.registration_qc.setdefault("montage_path", os.path.join(registration_dir, "registration_qc.png"))
+
     photo_preparation.save_photo_set_manifest(photo_set, photo_set_manifest_path)
 
     if not masks_drawn:

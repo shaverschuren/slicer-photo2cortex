@@ -29,10 +29,19 @@ class PhotoRecord:
     photo_type: Optional[str] = None
     registration_method: Optional["PhotoRegistrationMethod"] = None  # type: ignore
     registration_status: str = "pending"
+    registration_qc_status: str = "pending"
+    registration_qc_reviewed_at: Optional[str] = None
     registration_result_path: Optional[str] = None
     registered_image_path: Optional[str] = None
     masks: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.role == "reference":
+            self.registration_qc_status = "not_required"
+            self.registration_qc_reviewed_at = None
+        elif not self.registration_qc_status:
+            self.registration_qc_status = "pending"
 
     @property
     def is_reference(self) -> bool:
@@ -52,6 +61,7 @@ class PatientPhotoSet:
     post_resection_photo: Optional[PhotoRecord] = None
     secondary_photos: List[PhotoRecord] = field(default_factory=list)
     manifest_path: Optional[str] = None
+    registration_qc: Dict[str, Any] = field(default_factory=dict)
 
     def all_photos(self) -> List[PhotoRecord]:
         photos = [self.reference_photo]
@@ -102,21 +112,26 @@ def _manifest_entry_to_record(entry: Dict[str, Any], base_dir: str) -> PhotoReco
     role = _normalise_photo_role(entry.get("role"))
     method = _normalise_registration_method(entry.get("registration_method")) if entry.get("registration_method") else None
     status = str(entry.get("registration_status") or "pending")
-    return PhotoRecord(
+    qc_status = str(entry.get("registration_qc_status") or ("not_required" if role == "reference" else "pending"))
+    qc_reviewed_at = entry.get("registration_qc_reviewed_at")
+    row = PhotoRecord(
         photo_id=photo_id,
         source_path=source_path,
         role=role,
         photo_type=(entry.get("photo_type") or entry.get("type") or None),
         registration_method=method,
         registration_status=status,
+        registration_qc_status=qc_status,
+        registration_qc_reviewed_at=qc_reviewed_at,
         registration_result_path=_resolve_photo_path(str(entry["registration_result_path"]), base_dir) if entry.get("registration_result_path") else None,
         registered_image_path=_resolve_photo_path(str(entry["registered_image_path"]), base_dir) if entry.get("registered_image_path") else None,
         masks={
             key: _resolve_photo_path(str(value), base_dir) if isinstance(value, str) else value
             for key, value in dict(entry.get("masks") or {}).items()
         },
-        metadata={k: v for k, v in entry.items() if k not in {"id", "photo_id", "path", "source_path", "image_path", "role", "photo_type", "type", "registration_method", "registration_status", "registration_result_path", "registered_image_path", "masks"}},
+        metadata={k: v for k, v in entry.items() if k not in {"id", "photo_id", "path", "source_path", "image_path", "role", "photo_type", "type", "registration_method", "registration_status", "registration_qc_status", "registration_qc_reviewed_at", "registration_result_path", "registered_image_path", "masks"}},
     )
+    return row
 
 
 def validate_photo_set(photo_set: PatientPhotoSet) -> bool:
@@ -217,7 +232,17 @@ def discover_patient_photo_set(patient_id: str, patient_photo_dir: str, picture_
             photo.role = "secondary"
         if post_resection_photo is not None:
             post_resection_photo.role = "secondary"
-        photo_set = PatientPhotoSet(patient_id=patient_id, reference_photo=reference_photo, post_resection_photo=post_resection_photo, secondary_photos=secondary_photos, manifest_path=manifest_file)
+        photo_set = PatientPhotoSet(
+            patient_id=patient_id,
+            reference_photo=reference_photo,
+            post_resection_photo=post_resection_photo,
+            secondary_photos=secondary_photos,
+            manifest_path=manifest_file,
+            registration_qc=dict(manifest.get("registration_qc") or {}),
+        )
+        if photo_set.reference_photo.role == "reference":
+            photo_set.reference_photo.registration_qc_status = "not_required"
+            photo_set.reference_photo.registration_qc_reviewed_at = None
         validate_photo_set(photo_set)
         return photo_set
 
@@ -248,6 +273,8 @@ def build_photo_set_manifest(photo_set: PatientPhotoSet) -> Dict[str, Any]:
             "photo_type": photo.photo_type,
             "registration_method": photo.registration_method.value if isinstance(photo.registration_method, PhotoRegistrationMethod) else photo.registration_method,
             "registration_status": photo.registration_status,
+            "registration_qc_status": photo.registration_qc_status,
+            "registration_qc_reviewed_at": photo.registration_qc_reviewed_at,
             "registration_result_path": photo.registration_result_path,
             "registered_image_path": photo.registered_image_path,
             "masks": photo.masks,
@@ -257,6 +284,7 @@ def build_photo_set_manifest(photo_set: PatientPhotoSet) -> Dict[str, Any]:
         "patient_id": photo_set.patient_id,
         "reference_photo_id": photo_set.reference_photo.photo_id,
         "reference": photo_set.reference_photo.photo_id,
+        "registration_qc": dict(photo_set.registration_qc or {}),
         "photos": photos,
     }
 

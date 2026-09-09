@@ -151,6 +151,8 @@ def test_register_photo_set_reuses_valid_cached_registration(monkeypatch, tmp_pa
         role="secondary",
         registration_method=pr.PhotoRegistrationMethod.PROJECTIVE_8DOF,
         registration_status="registered",
+        registration_qc_status="approved",
+        registration_qc_reviewed_at="2026-09-09T14:12:34Z",
         registration_result_path=str(result_path),
         registered_image_path=str(registered_image_path),
     )
@@ -161,3 +163,32 @@ def test_register_photo_set_reuses_valid_cached_registration(monkeypatch, tmp_pa
     assert len(results) == 1
     assert results[0].status == "registered"
     assert results[0].moving_photo_id == "aux"
+    assert aux.registration_qc_status == "approved"
+    assert aux.registration_qc_reviewed_at == "2026-09-09T14:12:34Z"
+
+
+def test_register_photo_set_resets_qc_state_when_registration_is_recomputed(monkeypatch, tmp_path):
+    reference = PhotoRecord(photo_id="ref", source_path="ref.jpg", role="reference")
+    aux = PhotoRecord(
+        photo_id="aux",
+        source_path="aux.jpg",
+        role="secondary",
+        registration_qc_status="approved",
+        registration_qc_reviewed_at="2026-09-09T14:12:34Z",
+    )
+    photo_set = PatientPhotoSet(patient_id="P1", reference_photo=reference, secondary_photos=[aux])
+
+    def fake_register(moving_photo, reference_photo, method=None, **kwargs):
+        return pr.PhotoRegistrationResult(
+            reference_photo_id=reference_photo.photo_id,
+            moving_photo_id=moving_photo.photo_id,
+            method=pr._normalise_registration_method(method),
+            status="registered",
+            registered_image_path=str(tmp_path / "aux_registered.png"),
+        )
+
+    monkeypatch.setattr(pr, "register_photo_to_reference", fake_register)
+    pr.register_photo_set(photo_set, str(tmp_path))
+
+    assert aux.registration_qc_status == "pending"
+    assert aux.registration_qc_reviewed_at is None

@@ -19,6 +19,22 @@ import numpy as np
 from photo_preparation import PatientPhotoSet
 
 
+def set_registration_qc_pending(photo: Any) -> None:
+    """Reset QC status for a freshly recomputed registration so it must be reviewed again."""
+    photo.registration_qc_status = "pending"
+    photo.registration_qc_reviewed_at = None
+
+
+def registration_qc_is_approved(photo_set: PatientPhotoSet) -> bool:
+    """Return True only when every selected auxiliary registration has been approved."""
+    for photo in photo_set.all_photos()[1:]:
+        if photo.registration_status != "registered":
+            return False
+        if photo.registration_qc_status != "approved":
+            return False
+    return True
+
+
 class PhotoRegistrationMethod(Enum):
     """Supported photo-to-reference registration methods."""
 
@@ -252,6 +268,11 @@ def register_photo_set(photo_set: PatientPhotoSet, output_dir: str, method: Opti
         photo.registration_status = result.status
         photo.registered_image_path = result.registered_image_path
         photo.registration_result_path = result_path
+        if result.status == "registered":
+            set_registration_qc_pending(photo)
+        else:
+            photo.registration_qc_status = "pending" if photo.is_secondary else "not_required"
+            photo.registration_qc_reviewed_at = None
         save_registration_result(photo.registration_result_path, result)
 
         _reuse_or_warp_registered_masks(photo, result, output_dir)

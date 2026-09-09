@@ -70,6 +70,29 @@ def test_manifest_round_trip(tmp_path):
     assert reloaded_aux.masks.get("registered_path") == aux.masks["registered_path"]
 
 
+def test_manifest_round_trip_keeps_registration_qc_fields(tmp_path):
+    (tmp_path / "ref.jpg").write_bytes(b"x")
+    (tmp_path / "aux.jpg").write_bytes(b"x")
+
+    reference = pp.PhotoRecord(photo_id="ref", source_path=str(tmp_path / "ref.jpg"), role="reference")
+    aux = pp.PhotoRecord(
+        photo_id="aux",
+        source_path=str(tmp_path / "aux.jpg"),
+        role="secondary",
+        registration_status="registered",
+        registration_qc_status="approved",
+        registration_qc_reviewed_at="2026-09-09T14:12:34Z",
+    )
+    photo_set = pp.PatientPhotoSet(patient_id="P1", reference_photo=reference, secondary_photos=[aux])
+    manifest_path = tmp_path / "photo_set_manifest.json"
+    pp.save_photo_set_manifest(photo_set, str(manifest_path))
+
+    reloaded = pp.discover_patient_photo_set(patient_id="P1", patient_photo_dir=str(tmp_path), manifest_path=str(manifest_path))
+    assert reloaded.reference_photo.registration_qc_status == "not_required"
+    assert reloaded.secondary_photos[0].registration_qc_status == "approved"
+    assert reloaded.secondary_photos[0].registration_qc_reviewed_at == "2026-09-09T14:12:34Z"
+
+
 def test_manifest_with_multiple_reference_photos_raises(tmp_path):
     (tmp_path / "a.jpg").write_bytes(b"x")
     (tmp_path / "b.jpg").write_bytes(b"x")
