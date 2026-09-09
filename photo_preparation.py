@@ -110,9 +110,12 @@ def _manifest_entry_to_record(entry: Dict[str, Any], base_dir: str) -> PhotoReco
         photo_type=(entry.get("photo_type") or entry.get("type") or None),
         registration_method=method,
         registration_status=status,
-        registration_result_path=(entry.get("registration_result_path") or None),
-        registered_image_path=(entry.get("registered_image_path") or None),
-        masks=dict(entry.get("masks") or {}),
+        registration_result_path=_resolve_photo_path(str(entry["registration_result_path"]), base_dir) if entry.get("registration_result_path") else None,
+        registered_image_path=_resolve_photo_path(str(entry["registered_image_path"]), base_dir) if entry.get("registered_image_path") else None,
+        masks={
+            key: _resolve_photo_path(str(value), base_dir) if isinstance(value, str) else value
+            for key, value in dict(entry.get("masks") or {}).items()
+        },
         metadata={k: v for k, v in entry.items() if k not in {"id", "photo_id", "path", "source_path", "image_path", "role", "photo_type", "type", "registration_method", "registration_status", "registration_result_path", "registered_image_path", "masks"}},
     )
 

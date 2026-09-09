@@ -194,7 +194,10 @@ def register_photo_set(photo_set: PatientPhotoSet, output_dir: str, method: Opti
 
     A per-photo `registration_method` recorded on the manifest always takes
     precedence over the `method` argument, which is only used as a fallback
-    default for photos that do not specify one.
+    default for photos that do not specify one. Existing registered image and
+    result files are reused when they still describe the current photo pair;
+    this prevents the feature matcher from running again on every outer-loop
+    invocation.
     """
     os.makedirs(output_dir, exist_ok=True)
     default_method = method or PhotoRegistrationMethod.PROJECTIVE_8DOF
@@ -202,6 +205,32 @@ def register_photo_set(photo_set: PatientPhotoSet, output_dir: str, method: Opti
     for photo in photo_set.all_photos()[1:]:
         photo_method = photo.registration_method or default_method
         output_path = os.path.join(output_dir, f"{photo.photo_id}_registered.png")
+        result_path = photo.registration_result_path or os.path.join(output_dir, f"{photo.photo_id}_registration.json")
+        if photo.registered_image_path and os.path.exists(photo.registered_image_path) and os.path.exists(result_path):
+            try:
+                cached_result = load_registration(result_path)
+                cached_image_path = cached_result.registered_image_path
+                if cached_image_path and not os.path.isabs(cached_image_path):
+                    cached_image_path = os.path.join(os.path.dirname(result_path), cached_image_path)
+                if (
+                    cached_result.status == "registered"
+                    and cached_result.reference_photo_id == photo_set.reference_photo.photo_id
+                    and cached_result.moving_photo_id == photo.photo_id
+                    and cached_result.method == _normalise_registration_method(photo_method)
+                    and cached_image_path
+                    and os.path.exists(cached_image_path)
+                ):
+                    cached_result.registered_image_path = cached_image_path
+                    result = cached_result
+                    photo.registration_method = result.method
+                    photo.registration_status = result.status
+                    photo.registered_image_path = result.registered_image_path
+                    photo.registration_result_path = result_path
+                    _reuse_or_warp_registered_masks(photo, result, output_dir)
+                    results.append(result)
+                    continue
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                pass
         try:
             result = register_photo_to_reference(
                 photo,
@@ -222,20 +251,31 @@ def register_photo_set(photo_set: PatientPhotoSet, output_dir: str, method: Opti
         photo.registration_method = result.method
         photo.registration_status = result.status
         photo.registered_image_path = result.registered_image_path
-        photo.registration_result_path = os.path.join(output_dir, f"{photo.photo_id}_registration.json")
+        photo.registration_result_path = result_path
         save_registration_result(photo.registration_result_path, result)
 
-        mask_path = photo.masks.get("path") if photo.masks else None
-        if result.status == "registered" and mask_path and os.path.exists(mask_path):
-            try:
-                registered_mask_path = os.path.join(output_dir, f"{photo.photo_id}_registered_masks.npz")
-                warp_mask_file_to_reference(mask_path, result, registered_mask_path)
-                photo.masks["registered_path"] = registered_mask_path
-            except (NotImplementedError, ImportError, OSError, ValueError) as exc:
-                print(f"[photo_registration] Could not warp masks for '{photo.photo_id}' into the reference grid: {exc}")
+        _reuse_or_warp_registered_masks(photo, result, output_dir)
 
         results.append(result)
     return results
+
+
+def _reuse_or_warp_registered_masks(photo: Any, result: PhotoRegistrationResult, output_dir: str) -> None:
+    """Reuse an existing registered mask or create it once for a registered photo."""
+    if result.status != "registered" or not photo.masks:
+        return
+    registered_mask_path = photo.masks.get("registered_path")
+    if registered_mask_path and os.path.exists(registered_mask_path):
+        return
+    mask_path = photo.masks.get("path")
+    if not mask_path or not os.path.exists(mask_path):
+        return
+    try:
+        registered_mask_path = os.path.join(output_dir, f"{photo.photo_id}_registered_masks.npz")
+        warp_mask_file_to_reference(mask_path, result, registered_mask_path)
+        photo.masks["registered_path"] = registered_mask_path
+    except (NotImplementedError, ImportError, OSError, ValueError) as exc:
+        print(f"[photo_registration] Could not warp masks for '{photo.photo_id}' into the reference grid: {exc}")
 
 
 def warp_image_to_reference(moving_image: Any, registration: PhotoRegistrationResult, **kwargs: Any) -> Any:
