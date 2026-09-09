@@ -125,13 +125,18 @@ def _make_edge_panel(reference_rgb: np.ndarray, registered_rgb: np.ndarray) -> n
 def _registration_label(photo: Any, result: Optional[Any] = None) -> str:
     if result is None:
         return getattr(photo, "photo_type", None) or getattr(photo, "role", "secondary")
-    method_name = getattr(result.method, "value", str(result.method)) if hasattr(result.method, "value") else str(result.method)
     metadata = getattr(result, "metadata", {}) or {}
-    match_count = metadata.get("match_count")
+    method_name = f"ECC {metadata.get('dof', '?')}-DOF" if metadata.get("backend") == "opencv_ecc" else (getattr(result.method, "value", str(result.method)) if hasattr(result.method, "value") else str(result.method))
+    if metadata.get("backend") == "opencv_ecc" and metadata.get("ecc_score") is not None:
+        return f"{method_name} | rho={metadata['ecc_score']:.2f} | rot {metadata.get('rotation_deg', 0):.0f} deg | scale {metadata.get('relative_scale', 0):.2f} | overlap {100 * metadata.get('roi_overlap_fraction', 0):.0f}%"
+    match_count = metadata.get("mutual_match_count", metadata.get("match_count"))
     inlier_count = metadata.get("inlier_count")
     if match_count is not None and inlier_count is not None and match_count:
         ratio = 100.0 * inlier_count / match_count
-        return f"{method_name} | {inlier_count} / {match_count} inliers ({ratio:.0f}%)"
+        details = f"{method_name} | {inlier_count} / {match_count} inliers ({ratio:.0f}%)"
+        if metadata.get("estimated_scale") is not None and metadata.get("rotation_deg") is not None:
+            details += f" | scale {metadata['estimated_scale']:.2f} | rot {metadata['rotation_deg']:.0f} deg"
+        return details
     return method_name
 
 

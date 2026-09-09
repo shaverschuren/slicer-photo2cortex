@@ -22,7 +22,7 @@ The reference photograph is the one manually aligned to the cortex. Every second
 This architecture explicitly separates:
 
 - reference photo → cortex registration (manual, one per patient)
-- secondary photo → reference photo registration (feature-based projective registration)
+- secondary photo → reference photo registration (masked OpenCV ECC registration by default)
 - optimizer.py, which remains a future reference-photo→cortex optimisation tool and is not the same as 2D photo-to-photo registration
 
 The workflow endpoint is a **complete set of photo-to-cortex projections** — one projected brain-envelope model per selected photograph, all sharing the exact same reference-photo→cortex geometry (see `photo2cortex_output/projection_manifest.json`). A volumetric post-resection mask remains an optional extra, not the primary output:
@@ -184,7 +184,7 @@ photos:
   - id: grid_configuration_2
     path: grid2.jpg
     role: secondary
-    registration_method: projective_8dof
+    registration_dof: 8
 
   - id: post_resection
     path: post_resection.jpg
@@ -193,6 +193,18 @@ photos:
 ```
 
 If a patient contains exactly one usable photograph and no manifest, that single photo is automatically treated as the reference photograph. If multiple photos are present and no reference is specified, the workflow stops with a clear error instead of guessing.
+
+Registration uses the source-space `outside_mask` and optional `resection_mask`
+as separate ECC masks; only intact exposed cortex contributes to optimization.
+The automatic model is masked OpenCV ECC with 6-DOF affine motion, free
+rotation, multi-start initialization, overlap checks, and affine geometry
+sanity checks. Supported explicit models are 2, 3, 6, and 8 DOF via
+`registration_dof`.
+
+Cached registrations include algorithm, image, and source-mask fingerprints.
+Older feature-based cached results without this provenance are recomputed.
+Legacy `registration_method` values remain readable, but new results persist
+ECC backend and integer DOF provenance.
 
 ### Detailed Workflow
 

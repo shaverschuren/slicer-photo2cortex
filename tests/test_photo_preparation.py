@@ -65,6 +65,7 @@ def test_manifest_round_trip(tmp_path):
     assert len(reloaded.secondary_photos) == 1
     reloaded_aux = reloaded.secondary_photos[0]
     assert reloaded_aux.registration_status == "registered"
+    assert reloaded_aux.registration_method is None
     assert reloaded_aux.registered_image_path == aux.registered_image_path
     assert reloaded_aux.masks.get("path") == aux.masks["path"]
     assert reloaded_aux.masks.get("registered_path") == aux.masks["registered_path"]

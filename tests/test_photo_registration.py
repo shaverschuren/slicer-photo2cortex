@@ -1,5 +1,6 @@
 """Ordinary-Python tests for photo registration routing and mask warping. Claude-generated."""
 
+import os
 import numpy as np
 import pytest
 
@@ -8,11 +9,11 @@ from util import photo_registration as pr
 
 
 def _fake_register_factory(reference_dimensions=None, transform=None):
-    def fake_register(moving_photo, reference_photo, method=None, **kwargs):
+    def fake_register(moving_photo, reference_photo, dof=6, **kwargs):
         return pr.PhotoRegistrationResult(
             reference_photo_id=reference_photo.photo_id,
             moving_photo_id=moving_photo.photo_id,
-            method=pr._normalise_registration_method(method),
+            method=pr._method_from_dof(dof),
             status="registered",
             reference_dimensions=reference_dimensions,
             transform=transform,
@@ -20,15 +21,15 @@ def _fake_register_factory(reference_dimensions=None, transform=None):
     return fake_register
 
 
-def test_register_photo_set_respects_per_photo_registration_method(monkeypatch, tmp_path):
+def test_register_photo_set_uses_default_dof(monkeypatch, tmp_path):
     calls = {}
 
-    def fake_register(moving_photo, reference_photo, method=None, **kwargs):
-        calls[moving_photo.photo_id] = pr._normalise_registration_method(method)
+    def fake_register(moving_photo, reference_photo, dof=6, **kwargs):
+        calls[moving_photo.photo_id] = dof
         return pr.PhotoRegistrationResult(
             reference_photo_id=reference_photo.photo_id,
             moving_photo_id=moving_photo.photo_id,
-            method=pr._normalise_registration_method(method),
+            method=pr._method_from_dof(dof),
             status="registered",
         )
 
@@ -36,20 +37,16 @@ def test_register_photo_set_respects_per_photo_registration_method(monkeypatch, 
 
     reference = PhotoRecord(photo_id="ref", source_path="ref.jpg", role="reference")
     aux_default = PhotoRecord(photo_id="aux_default", source_path="a.jpg", role="secondary")
-    aux_explicit = PhotoRecord(
-        photo_id="aux_explicit", source_path="b.jpg", role="secondary",
-        registration_method=pr.PhotoRegistrationMethod.AFFINE_6DOF,
-    )
+    aux_explicit = PhotoRecord(photo_id="aux_explicit", source_path="b.jpg", role="secondary", registration_dof=3)
     photo_set = PatientPhotoSet(
         patient_id="P1", reference_photo=reference, secondary_photos=[aux_default, aux_explicit]
     )
 
-    pr.register_photo_set(photo_set, str(tmp_path), method=pr.PhotoRegistrationMethod.SIMILARITY_4DOF)
+    pr.register_photo_set(photo_set, str(tmp_path))
 
     # A photo without its own registration_method falls back to the caller's default...
-    assert calls["aux_default"] == pr.PhotoRegistrationMethod.SIMILARITY_4DOF
-    # ...but a per-photo method always takes precedence over that default.
-    assert calls["aux_explicit"] == pr.PhotoRegistrationMethod.AFFINE_6DOF
+    assert calls["aux_default"] == 6
+    assert calls["aux_explicit"] == 3
 
 
 def test_warp_mask_to_reference_identity_transform():
@@ -65,13 +62,22 @@ def test_warp_mask_to_reference_identity_transform():
     assert np.array_equal(warped, mask)
 
 
-def test_warp_mask_to_reference_rejects_non_projective_method():
+def test_warp_mask_to_reference_accepts_similarity_transform():
+    result = pr.PhotoRegistrationResult(
+        reference_photo_id="ref", moving_photo_id="m",
+        method=pr.PhotoRegistrationMethod.SIMILARITY_4DOF, status="registered",
+        reference_dimensions=(4, 4), transform=np.eye(3).tolist(),
+    )
+    assert pr.warp_mask_to_reference(np.zeros((4, 4), dtype=bool), result).shape == (4, 4)
+
+
+def test_warp_mask_to_reference_accepts_affine_ecc_transform():
     result = pr.PhotoRegistrationResult(
         reference_photo_id="ref", moving_photo_id="m",
         method=pr.PhotoRegistrationMethod.AFFINE_6DOF, status="registered",
+        reference_dimensions=(4, 4), transform=np.eye(3).tolist(),
     )
-    with pytest.raises(NotImplementedError):
-        pr.warp_mask_to_reference(np.zeros((4, 4), dtype=bool), result)
+    assert pr.warp_mask_to_reference(np.zeros((4, 4), dtype=bool), result).shape == (4, 4)
 
 
 def test_register_photo_set_warps_masks_with_nearest_neighbour(monkeypatch, tmp_path):
@@ -123,6 +129,26 @@ def test_register_photo_set_does_not_warp_masks_when_registration_pending(monkey
 
 
 def test_register_photo_set_reuses_valid_cached_registration(monkeypatch, tmp_path):
+    from PIL import Image
+
+    reference_path = tmp_path / "ref.jpg"
+    moving_path = tmp_path / "aux.jpg"
+    Image.new("RGB", (8, 8), color="white").save(reference_path)
+    Image.new("RGB", (8, 8), color="white").save(moving_path)
+    reference_mask_path = tmp_path / "ref_masks.npz"
+    moving_mask_path = tmp_path / "aux_masks.npz"
+    np.savez_compressed(reference_mask_path, outside_mask=np.zeros((8, 8), bool))
+    np.savez_compressed(moving_mask_path, outside_mask=np.zeros((8, 8), bool))
+    reference = PhotoRecord(photo_id="ref", source_path=str(reference_path), role="reference")
+    aux = PhotoRecord(
+        photo_id="aux", source_path=str(moving_path), role="secondary",
+        registration_dof=8,
+        registration_status="registered",
+        registration_qc_status="approved",
+        registration_qc_reviewed_at="2026-09-09T14:12:34Z",
+    )
+    reference.masks["path"] = str(reference_mask_path)
+    aux.masks["path"] = str(moving_mask_path)
     registered_image_path = tmp_path / "aux_registered.png"
     registered_image_path.write_bytes(b"registered")
     result_path = tmp_path / "aux_registration.json"
@@ -137,6 +163,7 @@ def test_register_photo_set_reuses_valid_cached_registration(monkeypatch, tmp_pa
         reference_dimensions=(8, 8),
         transform=np.eye(3).tolist(),
     )
+    cached_result.metadata.update({"backend": "opencv_ecc", "dof": 8, "algorithm_version": pr.REGISTRATION_ALGORITHM_VERSION, "cache_signature": pr._registration_cache_signature(aux, reference, 8)})
     pr.save_registration_result(str(result_path), cached_result)
 
     def fail_if_called(*args, **kwargs):
@@ -144,18 +171,8 @@ def test_register_photo_set_reuses_valid_cached_registration(monkeypatch, tmp_pa
 
     monkeypatch.setattr(pr, "register_photo_to_reference", fail_if_called)
 
-    reference = PhotoRecord(photo_id="ref", source_path="ref.jpg", role="reference")
-    aux = PhotoRecord(
-        photo_id="aux",
-        source_path="aux.jpg",
-        role="secondary",
-        registration_method=pr.PhotoRegistrationMethod.PROJECTIVE_8DOF,
-        registration_status="registered",
-        registration_qc_status="approved",
-        registration_qc_reviewed_at="2026-09-09T14:12:34Z",
-        registration_result_path=str(result_path),
-        registered_image_path=str(registered_image_path),
-    )
+    aux.registration_result_path = str(result_path)
+    aux.registered_image_path = str(registered_image_path)
     photo_set = PatientPhotoSet(patient_id="P1", reference_photo=reference, secondary_photos=[aux])
 
     results = pr.register_photo_set(photo_set, str(tmp_path))
@@ -192,3 +209,117 @@ def test_register_photo_set_resets_qc_state_when_registration_is_recomputed(monk
 
     assert aux.registration_qc_status == "pending"
     assert aux.registration_qc_reviewed_at is None
+
+
+def test_build_registration_roi_excludes_outside_and_resection():
+    outside = np.zeros((5, 6), dtype=bool)
+    outside[0, :] = True
+    resection = np.zeros_like(outside)
+    resection[2, 3] = True
+    roi = pr.build_registration_roi(outside, resection)
+    assert not roi[0, 0]
+    assert not roi[2, 3]
+    assert roi[2, 2]
+
+
+def test_load_registration_roi_rejects_mask_shape_mismatch(tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "photo.jpg"
+    mask_path = tmp_path / "photo_masks.npz"
+    Image.new("RGB", (8, 6), color="white").save(image_path)
+    np.savez_compressed(mask_path, outside_mask=np.zeros((5, 8), dtype=bool))
+    photo = PhotoRecord(photo_id="photo", source_path=str(image_path), masks={"path": str(mask_path)})
+    with pytest.raises(ValueError, match="does not match source image shape"):
+        pr.load_registration_roi(photo, (6, 8, 3))
+
+
+def test_ecc_dof_routing_matches_opencv_constants():
+    import cv2
+
+    assert pr.DEFAULT_REGISTRATION_DOF == 6
+    assert pr.ecc_motion_type(2) == cv2.MOTION_TRANSLATION
+    assert pr.ecc_motion_type(3) == cv2.MOTION_EUCLIDEAN
+    assert pr.ecc_motion_type(6) == cv2.MOTION_AFFINE
+    assert pr.ecc_motion_type(8) == cv2.MOTION_HOMOGRAPHY
+    with pytest.raises(ValueError, match="Supported ECC models"):
+        pr.validate_registration_dof(4)
+
+
+def test_ecc_initialization_allows_large_rotation_and_resolution_scale():
+    moving_shape = (100, 100, 3)
+    reference_shape = (200, 200, 3)
+    moving_roi = np.zeros(moving_shape[:2], dtype=bool)
+    reference_roi = np.zeros(reference_shape[:2], dtype=bool)
+    moving_roi[25:75, 25:75] = True
+    reference_roi[50:150, 50:150] = True
+    angle = np.deg2rad(170.0)
+    scale = 2.0
+    linear = scale * np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    translation = np.array([99.5, 99.5]) - linear @ np.array([49.5, 49.5])
+    initial = pr.initial_warp_for_dof(6, moving_shape, reference_shape, np.array([49.5, 49.5]), np.array([99.5, 99.5]), 170)
+    assert initial.shape == (2, 3)
+    assert initial[0, 0] == pytest.approx(linear[0, 0], abs=0.1)
+
+
+def test_similarity_validation_rejects_scale_reflection_and_centre_jump():
+    roi = np.ones((100, 100), dtype=bool)
+    with pytest.raises(ValueError, match="Supported ECC models"):
+        pr.validate_registration_dof(4)
+    too_large = pr._validate_ecc_transform(np.array([[3, 0, -100], [0, 3, -100], [0, 0, 1]], dtype=float), (100, 100), (100, 100), roi, roi, 6)
+    assert not too_large["valid"]
+    assert "scale" in too_large["error"]
+    reflected = pr._validate_ecc_transform(np.array([[-1, 0, 99], [0, 1, 0], [0, 0, 1]], dtype=float), (100, 100), (100, 100), roi, roi, 6)
+    assert not reflected["valid"]
+    assert not reflected["orientation_preserving"]
+    displaced = pr._validate_ecc_transform(np.array([[1, 0, 90], [0, 1, 90], [0, 0, 1]], dtype=float), (100, 100), (100, 100), roi, roi, 3)
+    assert not displaced["valid"]
+    assert "centre" in displaced["error"]
+
+
+def test_registration_cache_signature_changes_when_mask_changes(tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "photo.jpg"
+    Image.new("RGB", (8, 8), color="white").save(image_path)
+    mask_path = tmp_path / "masks.npz"
+    np.savez_compressed(mask_path, outside_mask=np.zeros((8, 8), dtype=bool))
+    reference = PhotoRecord(photo_id="ref", source_path=str(image_path), role="reference", masks={"path": str(mask_path)})
+    moving = PhotoRecord(photo_id="moving", source_path=str(image_path), masks={"path": str(mask_path)})
+    first = pr._registration_cache_signature(moving, reference, pr.PhotoRegistrationMethod.SIMILARITY_4DOF)
+    np.savez_compressed(mask_path, outside_mask=np.ones((8, 8), dtype=bool))
+    stat = mask_path.stat()
+    mask_path.touch()
+    os.utime(mask_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    second = pr._registration_cache_signature(moving, reference, pr.PhotoRegistrationMethod.SIMILARITY_4DOF)
+    assert first != second
+
+
+def test_ecc_registration_uses_both_masks_and_all_rotation_starts(monkeypatch, tmp_path):
+    import cv2
+    from PIL import Image
+
+    reference_path = tmp_path / "reference.png"
+    moving_path = tmp_path / "moving.png"
+    Image.new("RGB", (100, 100), color="gray").save(reference_path)
+    Image.new("RGB", (100, 100), color="gray").save(moving_path)
+    reference_mask = tmp_path / "reference.npz"
+    moving_mask = tmp_path / "moving.npz"
+    np.savez_compressed(reference_mask, outside_mask=np.zeros((100, 100), bool))
+    np.savez_compressed(moving_mask, outside_mask=np.zeros((100, 100), bool), resection_mask=np.zeros((100, 100), bool))
+    reference = PhotoRecord("reference", str(reference_path), role="reference", masks={"path": str(reference_mask)})
+    moving = PhotoRecord("moving", str(moving_path), masks={"path": str(moving_mask)})
+    calls = []
+
+    def fake_ecc(template, input_image, template_mask, input_mask, warp, motion_type):
+        calls.append((template_mask.copy(), input_mask.copy(), motion_type, warp.copy()))
+        return 0.9, np.eye(2, 3, dtype=np.float32)
+
+    monkeypatch.setattr(pr, "_ecc_with_mask", fake_ecc)
+    result = pr.register_ecc(moving, reference, dof=6)
+
+    assert len(calls) == 8
+    assert all(call[0].dtype == np.uint8 and call[1].dtype == np.uint8 for call in calls)
+    assert all(call[2] == cv2.MOTION_AFFINE for call in calls)
+    assert result.metadata["backend"] == "opencv_ecc"
+    assert result.metadata["dof"] == 6

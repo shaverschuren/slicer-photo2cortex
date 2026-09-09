@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 import yaml
-import shutil
 import subprocess
 import platform
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ class PhotoRecord:
     role: str = "secondary"
     photo_type: Optional[str] = None
     registration_method: Optional["PhotoRegistrationMethod"] = None  # type: ignore
+    registration_dof: Optional[int] = None
     registration_status: str = "pending"
     registration_qc_status: str = "pending"
     registration_qc_reviewed_at: Optional[str] = None
@@ -111,6 +111,11 @@ def _manifest_entry_to_record(entry: Dict[str, Any], base_dir: str) -> PhotoReco
         raise ValueError(f"Manifest photo entry is missing a valid path: {entry!r}")
     role = _normalise_photo_role(entry.get("role"))
     method = _normalise_registration_method(entry.get("registration_method")) if entry.get("registration_method") else None
+    # Projective values from pre-version manifests were often written by the old
+    # automatic default, so they are migrated to the new automatic default unless
+    # the manifest explicitly records a deliberate projective choice.
+    if method is not None and method.value == "projective_8dof" and not entry.get("registration_method_explicit", False):
+        method = None
     status = str(entry.get("registration_status") or "pending")
     qc_status = str(entry.get("registration_qc_status") or ("not_required" if role == "reference" else "pending"))
     qc_reviewed_at = entry.get("registration_qc_reviewed_at")
@@ -120,6 +125,7 @@ def _manifest_entry_to_record(entry: Dict[str, Any], base_dir: str) -> PhotoReco
         role=role,
         photo_type=(entry.get("photo_type") or entry.get("type") or None),
         registration_method=method,
+        registration_dof=entry.get("registration_dof"),
         registration_status=status,
         registration_qc_status=qc_status,
         registration_qc_reviewed_at=qc_reviewed_at,
@@ -129,7 +135,7 @@ def _manifest_entry_to_record(entry: Dict[str, Any], base_dir: str) -> PhotoReco
             key: _resolve_photo_path(str(value), base_dir) if isinstance(value, str) else value
             for key, value in dict(entry.get("masks") or {}).items()
         },
-        metadata={k: v for k, v in entry.items() if k not in {"id", "photo_id", "path", "source_path", "image_path", "role", "photo_type", "type", "registration_method", "registration_status", "registration_qc_status", "registration_qc_reviewed_at", "registration_result_path", "registered_image_path", "masks"}},
+        metadata={k: v for k, v in entry.items() if k not in {"id", "photo_id", "path", "source_path", "image_path", "role", "photo_type", "type", "registration_method", "registration_dof", "registration_status", "registration_qc_status", "registration_qc_reviewed_at", "registration_result_path", "registered_image_path", "masks"}},
     )
     return row
 
@@ -272,6 +278,8 @@ def build_photo_set_manifest(photo_set: PatientPhotoSet) -> Dict[str, Any]:
             "role": photo.role,
             "photo_type": photo.photo_type,
             "registration_method": photo.registration_method.value if isinstance(photo.registration_method, PhotoRegistrationMethod) else photo.registration_method,
+            "registration_dof": photo.registration_dof,
+            "registration_method_explicit": bool(photo.metadata.get("registration_method_explicit", False)),
             "registration_status": photo.registration_status,
             "registration_qc_status": photo.registration_qc_status,
             "registration_qc_reviewed_at": photo.registration_qc_reviewed_at,
@@ -518,16 +526,6 @@ def discover_photo_set(patient_id, picture_root, patient_photo_dir=None, manifes
         manifest_path=manifest_path,
     )
     return photo_set
-
-
-def copy_photo_to_output(photo_path, output_dir, patient_id, preferred_name=None):
-    """Copy a photograph into the output directory and return the copied path."""
-    os.makedirs(output_dir, exist_ok=True)
-    base_name = preferred_name or os.path.basename(photo_path)
-    dest_path = os.path.join(output_dir, base_name)
-    if os.path.abspath(photo_path) != os.path.abspath(dest_path):
-        shutil.copy2(photo_path, dest_path)
-    return dest_path
 
 
 def draw_photo_masks(photo_path, save_path=None, tqdm_handle=None, photo_role="reference", include_resection=None):

@@ -238,7 +238,7 @@ def process_subject(
     reference_photo.masks["path"] = mask_path
 
     registration_dir = os.path.join(output_dir, "registered_photos")
-    registration_results = register_photo_set(photo_set, registration_dir)
+    registration_results = register_photo_set(photo_set, registration_dir, dof=6)
     tqdm.write(
         f"Photo-to-reference registration completed for {sum(result.status == 'registered' for result in registration_results)} "
         f"of {len(registration_results)} selected secondary photo(s)."
