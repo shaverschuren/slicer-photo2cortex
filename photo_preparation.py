@@ -14,9 +14,8 @@ import matplotlib
 matplotlib.use("TkAgg")
 
 import matplotlib.pyplot as plt
-from PIL import Image
+from PIL import Image, ImageDraw
 from matplotlib.widgets import PolygonSelector
-from matplotlib.path import Path
 import tkinter as tk
 from tkinter import filedialog
 
@@ -71,8 +70,8 @@ def _normalise_photo_role(role: Optional[str]) -> str:
         return "secondary"
     return value
 
-
 def _read_manifest_file(path: str) -> Dict[str, Any]:
+    """Read a JSON or YAML photo-set manifest."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Photo-set manifest not found: {path}")
     with open(path, "r", encoding="utf-8") as fh:
@@ -518,14 +517,21 @@ def draw_photo_masks(photo_path, save_path=None, tqdm_handle=None, photo_role="r
     if include_resection is None:
         include_resection = photo_role != "reference"
 
-    img = np.array(Image.open(photo_path).convert("RGB"))
-    h, w, _ = img.shape
+    image = Image.open(photo_path)
+    w, h = image.size
+    max_display_size = 2000
+    image.thumbnail((max_display_size, max_display_size), Image.Resampling.LANCZOS)
+    display_img = np.asarray(image.convert("RGB"))
+    image.close()
+    display_h, display_w, _ = display_img.shape
+    x_scale = w / display_w
+    y_scale = h / display_h
     resection_mask = np.zeros((h, w), bool)
     outside_mask = np.zeros((h, w), bool)
 
     plt.ion()
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(img)
+    ax.imshow(display_img)
 
     if include_resection:
         ax.set_title("Draw resection area (double-click to close, ENTER to confirm)")
@@ -536,15 +542,23 @@ def draw_photo_masks(photo_path, save_path=None, tqdm_handle=None, photo_role="r
     abort = [False]
 
     def polygon_to_mask(verts):
-        path = Path(verts)
-        y, x = np.mgrid[:h, :w]
-        coords = np.stack((x.ravel(), y.ravel()), axis=-1)
-        return path.contains_points(coords).reshape(h, w)
+        scaled_verts = [(round(x * x_scale), round(y * y_scale)) for x, y in verts]
+        polygon_image = Image.new("1", (w, h))
+        ImageDraw.Draw(polygon_image).polygon(scaled_verts, fill=1)
+        return np.asarray(polygon_image, dtype=bool)
+
+    def show_polygon(verts, color):
+        display_mask = Image.new("1", (display_w, display_h))
+        ImageDraw.Draw(display_mask).polygon(verts, fill=1)
+        overlay = np.zeros((display_h, display_w, 4), dtype=float)
+        overlay[..., :3] = color[:3]
+        overlay[..., 3] = np.asarray(display_mask, dtype=bool) * color[3]
+        ax.imshow(overlay)
 
     def onselect_resection(verts):
         nonlocal resection_mask
         resection_mask[:] = polygon_to_mask(verts)
-        ax.imshow(np.dstack((img / 255.0, np.where(resection_mask, 0.4, 0.0))))
+        show_polygon(verts, (1.0, 0.0, 0.0, 0.4))
         ax.set_title("Resection drawn. Press ENTER to continue.")
         fig.canvas.draw_idle()
 
@@ -577,11 +591,10 @@ def draw_photo_masks(photo_path, save_path=None, tqdm_handle=None, photo_role="r
 
     def onselect_outside(verts):
         outside_mask[:] = np.logical_not(polygon_to_mask(verts))
-        ax.imshow(np.dstack((img / 255.0, np.where(outside_mask, 0.4, 0.0))))
+        show_polygon(verts, (0.0, 0.0, 0.0, 0.6))
         ax.set_title("Outside area drawn. Press ENTER to finish.")
         fig.canvas.draw_idle()
 
-    ax.imshow(img)
     ax.set_title("Draw OUTSIDE area (double-click to close, ENTER to confirm)")
     selector = PolygonSelector(ax, onselect_outside, useblit=True)
 
