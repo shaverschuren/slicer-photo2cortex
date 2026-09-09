@@ -121,7 +121,7 @@ Before running the scripts, you need to configure the paths to your data and sof
      subject_dir_regex: RESP*
      reprocess: false
      process_only_photo: false
-    process_only_envelope: false
+     process_only_envelope: false
    ```
 
    - `slicer_exe_path`: Full path to the Slicer executable
