@@ -1,3 +1,5 @@
+"""Module to project a color-coded surface mask into a grey matter volume along surface normals within Slicer-Python."""
+
 import numpy as np
 import slicer
 import vtk

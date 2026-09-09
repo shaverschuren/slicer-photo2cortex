@@ -231,7 +231,7 @@ photo2cortex/
 ├── main_slicer_loop.py        # Main entry point for registration workflow
 ├── fs_envelope_loop.py        # Pre-compute envelopes for all patients
 ├── slicer_script.py           # Slicer automation script (runs inside Slicer)
-├── process_photograph.py      # Photo preprocessing and file handling
+├── photo_preparation.py      # Photo preprocessing and file handling
 ├── surf2vol.py                # Surface-to-volume projection utilities
 ├── optimizer.py               # Auto-alignment optimization (experimental)
 ├── util/                      # Utility package with specialized modules
@@ -250,7 +250,7 @@ photo2cortex/
 - **main_slicer_loop.py**: Orchestrates the batch processing workflow, loading configuration and iterating through patients
 - **fs_envelope_loop.py**: Standalone script to pre-generate surface envelopes
 - **slicer_script.py**: Executed inside Slicer's Python environment to set up the registration scene
-- **process_photograph.py**: Handles photograph file discovery, copying, and preprocessing
+- **photo_preparation.py**: Handles photograph file discovery, copying, and preprocessing
 - **surf2vol.py**: Converts FreeSurfer surface masks to volumetric representations
 - **util/**: Utility package containing specialized modules:
   - **io.py**: Scene and file I/O operations, STL handling, envelope creation

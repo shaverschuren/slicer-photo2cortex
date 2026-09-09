@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import os
-import glob
+import json
+import yaml
 import shutil
 import subprocess
 import platform
-import json
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import matplotlib
 
@@ -16,12 +20,267 @@ from matplotlib.path import Path
 import tkinter as tk
 from tkinter import filedialog
 
-from photo_registration import (
-    PatientPhotoSet,
-    PhotoRecord,
-    discover_patient_photo_set,
-    save_photo_set_manifest,
-)
+@dataclass
+class PhotoRecord:
+    """Metadata for one photograph in a patient photo set."""
+
+    photo_id: str
+    source_path: str
+    role: str = "secondary"
+    photo_type: Optional[str] = None
+    registration_method: Optional["PhotoRegistrationMethod"] = None  # type: ignore
+    registration_status: str = "pending"
+    registration_result_path: Optional[str] = None
+    registered_image_path: Optional[str] = None
+    masks: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_reference(self) -> bool:
+        return self.role == "reference"
+
+    @property
+    def is_secondary(self) -> bool:
+        return self.role == "secondary"
+
+
+@dataclass
+class PatientPhotoSet:
+    """The complete patient-level set of reference and secondary photographs."""
+
+    patient_id: str
+    reference_photo: PhotoRecord
+    post_resection_photo: Optional[PhotoRecord] = None
+    secondary_photos: List[PhotoRecord] = field(default_factory=list)
+    manifest_path: Optional[str] = None
+
+    def all_photos(self) -> List[PhotoRecord]:
+        photos = [self.reference_photo]
+        if self.post_resection_photo is not None:
+            photos.append(self.post_resection_photo)
+        return photos + list(self.secondary_photos)
+
+
+def _normalise_photo_role(role: Optional[str]) -> str:
+    if role is None:
+        return "secondary"
+    value = str(role).strip().lower()
+    if value in {"reference", "fixed"}:
+        return "reference"
+    if value in {"secondary", "moving"}:
+        return "secondary"
+    return value
+
+
+def _read_manifest_file(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Photo-set manifest not found: {path}")
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    if path.lower().endswith(".json"):
+        return json.loads(text)
+    if yaml is not None:
+        return yaml.safe_load(text) or {}
+    raise RuntimeError("YAML support is unavailable and the manifest is not JSON.")
+
+
+def _resolve_photo_path(source_path: str, base_dir: str) -> str:
+    if os.path.isabs(source_path):
+        return source_path
+    candidate = os.path.join(base_dir, source_path)
+    if os.path.exists(candidate):
+        return candidate
+    return source_path
+
+
+def _manifest_entry_to_record(entry: Dict[str, Any], base_dir: str) -> PhotoRecord:
+    from util.photo_registration import _normalise_registration_method
+
+    photo_id = str(entry.get("id") or entry.get("photo_id") or os.path.splitext(os.path.basename(str(entry.get("path", ""))))[0] or "photo")
+    source_path = _resolve_photo_path(str(entry.get("path") or entry.get("source_path") or entry.get("image_path") or ""), base_dir)
+    if not source_path:
+        raise ValueError(f"Manifest photo entry is missing a valid path: {entry!r}")
+    role = _normalise_photo_role(entry.get("role"))
+    method = _normalise_registration_method(entry.get("registration_method")) if entry.get("registration_method") else None
+    status = str(entry.get("registration_status") or "pending")
+    return PhotoRecord(
+        photo_id=photo_id,
+        source_path=source_path,
+        role=role,
+        photo_type=(entry.get("photo_type") or entry.get("type") or None),
+        registration_method=method,
+        registration_status=status,
+        registration_result_path=(entry.get("registration_result_path") or None),
+        registered_image_path=(entry.get("registered_image_path") or None),
+        masks=dict(entry.get("masks") or {}),
+        metadata={k: v for k, v in entry.items() if k not in {"id", "photo_id", "path", "source_path", "image_path", "role", "photo_type", "type", "registration_method", "registration_status", "registration_result_path", "registered_image_path", "masks"}},
+    )
+
+
+def validate_photo_set(photo_set: PatientPhotoSet) -> bool:
+    """Validate the patient photo set invariants."""
+
+    if photo_set.reference_photo is None:
+        raise ValueError("Patient photo set is missing a reference photo.")
+    if not os.path.exists(photo_set.reference_photo.source_path):
+        raise FileNotFoundError(f"Reference photo not found: {photo_set.reference_photo.source_path}")
+    references = [photo for photo in photo_set.all_photos() if photo.is_reference]
+    if len(references) != 1:
+        raise ValueError(f"Patient photo set must contain exactly one reference photo. Found {len(references)}.")
+    for photo in photo_set.secondary_photos:
+        if not os.path.exists(photo.source_path):
+            raise FileNotFoundError(f"Secondary photo not found: {photo.source_path}")
+    return True
+
+
+def discover_patient_photo_set(patient_id: str, patient_photo_dir: str, picture_root: Optional[str] = None, manifest_path: Optional[str] = None) -> PatientPhotoSet:
+    """Discover and validate patient photos with single-photo backward compatibility.
+
+    When only one photograph exists and no manifest was supplied, the photo is
+    treated as the reference photograph. When multiple photographs exist without a
+    manifest or explicit reference, this raises a clear ValueError instead of
+    silently guessing.
+    """
+
+    if picture_root is None:
+        picture_root = patient_photo_dir
+
+    candidate_dirs = []
+    patient_dir = os.path.join(picture_root, patient_id)
+    if os.path.isdir(patient_dir):
+        candidate_dirs.append(patient_dir)
+    if os.path.isdir(patient_photo_dir):
+        candidate_dirs.append(patient_photo_dir)
+    seen_dirs = set()
+    base_dir = None
+    for directory in candidate_dirs:
+        if directory not in seen_dirs:
+            seen_dirs.add(directory)
+            if os.path.isdir(directory):
+                base_dir = directory
+                break
+
+    if base_dir is None:
+        base_dir = patient_photo_dir
+
+    manifest_candidates = []
+    if manifest_path is not None:
+        manifest_candidates.append(manifest_path)
+    manifest_candidates.extend([
+        os.path.join(base_dir, "photos.yaml"),
+        os.path.join(base_dir, "photos.yml"),
+        os.path.join(base_dir, "photos.json"),
+        os.path.join(base_dir, patient_id, "photos.yaml"),
+        os.path.join(base_dir, patient_id, "photos.json"),
+    ])
+    manifest_file = next((candidate for candidate in manifest_candidates if os.path.exists(candidate)), None)
+
+    if manifest_file is not None:
+        manifest = _read_manifest_file(manifest_file)
+        photo_entries = manifest.get("photos") if isinstance(manifest.get("photos"), list) else []
+        if not photo_entries:
+            raise ValueError(f"Manifest '{manifest_file}' does not contain a valid 'photos' list.")
+
+        photos = [_manifest_entry_to_record(entry, os.path.dirname(manifest_file)) for entry in photo_entries]
+        refs = [photo for photo in photos if photo.is_reference]
+        if len(refs) > 1:
+            raise ValueError(f"Manifest '{manifest_file}' contains more than one reference photo. There must be exactly one reference.")
+
+        reference_id = manifest.get("reference")
+        if reference_id is not None:
+            matching = [photo for photo in photos if photo.photo_id == str(reference_id)]
+            if len(matching) != 1:
+                raise ValueError(f"Manifest '{manifest_file}' references reference '{reference_id}', but it does not resolve to exactly one photograph.")
+            reference_photo = matching[0]
+            reference_photo.role = "reference"
+            if len(refs) > 0 and refs[0].photo_id != reference_photo.photo_id:
+                raise ValueError(f"Manifest '{manifest_file}' has multiple photos marked as reference. There must be exactly one reference photo.")
+        else:
+            if len(refs) == 1:
+                reference_photo = refs[0]
+            elif len(refs) > 1:
+                raise ValueError(f"Manifest '{manifest_file}' contains more than one reference photo. There must be exactly one reference.")
+            elif len(photos) == 1:
+                photos[0].role = "reference"
+                reference_photo = photos[0]
+            else:
+                raise ValueError("Multiple photographs found but no reference was specified. Add a 'reference' field or set one photo role to 'reference' in the manifest.")
+
+        post_resection_photos = [photo for photo in photos if photo.photo_type in {"resection", "post_resection"} and photo.photo_id != reference_photo.photo_id]
+        if len(post_resection_photos) > 1:
+            raise ValueError(f"Manifest '{manifest_file}' contains more than one post-resection photo.")
+        post_resection_photo = post_resection_photos[0] if post_resection_photos else None
+        secondary_photos = [photo for photo in photos if photo.photo_id != reference_photo.photo_id and photo is not post_resection_photo]
+        for photo in secondary_photos:
+            photo.role = "secondary"
+        if post_resection_photo is not None:
+            post_resection_photo.role = "secondary"
+        photo_set = PatientPhotoSet(patient_id=patient_id, reference_photo=reference_photo, post_resection_photo=post_resection_photo, secondary_photos=secondary_photos, manifest_path=manifest_file)
+        validate_photo_set(photo_set)
+        return photo_set
+
+    photo_files = _discover_image_files(base_dir)
+    if not photo_files:
+        raise FileNotFoundError(f"No photographs found for patient '{patient_id}' under '{base_dir}'.")
+    if len(photo_files) == 1:
+        photo = PhotoRecord(photo_id=os.path.splitext(os.path.basename(photo_files[0]))[0], source_path=photo_files[0], role="reference")
+        return PatientPhotoSet(patient_id=patient_id, reference_photo=photo, post_resection_photo=None, secondary_photos=[], manifest_path=None)
+    raise ValueError(
+        f"Multiple photographs found for patient '{patient_id}' in '{base_dir}' and no explicit reference was specified. "
+        "Add a photos.yaml/photos.json manifest with one photo marked as 'reference'."
+    )
+
+
+def build_photo_set_manifest(photo_set: PatientPhotoSet) -> Dict[str, Any]:
+    """Create a normalized photo-set manifest for Slicer and other downstream consumers."""
+
+    from util.photo_registration import PhotoRegistrationMethod
+
+    photos = []
+    for photo in photo_set.all_photos():
+        entry = dict(photo.metadata)
+        entry.update({
+            "id": photo.photo_id,
+            "path": os.path.relpath(photo.source_path, os.path.dirname(photo_set.manifest_path or os.getcwd())) if photo_set.manifest_path else photo.source_path,
+            "role": photo.role,
+            "photo_type": photo.photo_type,
+            "registration_method": photo.registration_method.value if isinstance(photo.registration_method, PhotoRegistrationMethod) else photo.registration_method,
+            "registration_status": photo.registration_status,
+            "registration_result_path": photo.registration_result_path,
+            "registered_image_path": photo.registered_image_path,
+            "masks": photo.masks,
+        })
+        photos.append({k: v for k, v in entry.items() if v is not None and not (k == "masks" and not v)})
+    return {
+        "patient_id": photo_set.patient_id,
+        "reference_photo_id": photo_set.reference_photo.photo_id,
+        "reference": photo_set.reference_photo.photo_id,
+        "photos": photos,
+    }
+
+
+def save_photo_set_manifest(photo_set: PatientPhotoSet, manifest_path: str) -> str:
+    """Persist a patient photo-set manifest to JSON or YAML."""
+
+    payload = build_photo_set_manifest(photo_set)
+    directory = os.path.dirname(manifest_path)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+    if manifest_path.lower().endswith(".yaml") or manifest_path.lower().endswith(".yml"):
+        if yaml is None:
+            raise RuntimeError("PyYAML is required for YAML output.")
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(payload, fh, sort_keys=False)
+    else:
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    return manifest_path
+
+
+def discover_photo_set_manifest(patient_id: str, patient_photo_dir: str, manifest_path: Optional[str] = None) -> PatientPhotoSet:
+    """Compatibility wrapper used by the workflow when the patient photo set is specified by manifest."""
+    return discover_patient_photo_set(patient_id=patient_id, patient_photo_dir=patient_photo_dir, picture_root=patient_photo_dir, manifest_path=manifest_path)
+
 
 def open_image_viewer(path):
     """
@@ -42,14 +301,13 @@ def open_image_viewer(path):
     if system == "Windows":
         # Use 'start' through cmd so we get a handle
         return subprocess.Popen(["explorer", path])
-
     elif system == "Darwin":  # macOS
         # Preview stays open, but we can kill it later by name
         return subprocess.Popen(["open", "-a", "Preview", path])
-
     else:  # Linux
         # Use eog (Eye of GNOME) or fallback viewer
         return subprocess.Popen(["eog", path])
+
 
 def close_image_viewer(process):
     """
@@ -64,98 +322,11 @@ def close_image_viewer(process):
 
     if system == "Windows":
         process.terminate()  # Try to close process (doesn't always work, needs manual close)
-
     elif system == "Darwin":  # macOS
         subprocess.run(["pkill", "Preview"])  # Close Preview
-
     else:  # Linux
         process.terminate()  # Close eog
 
-def find_post_resection_photo_path(patient_id, picture_root, copy_dir=None, tqdm_handle=None):
-    """
-    Find the path to the intraoperative photograph for a given patient ID.
-    
-    Parameters
-    ----------
-    patient_id : str
-        Patient identifier (e.g., 'RESP001')
-    picture_root : str
-        Root directory containing patient photograph subdirectories
-    copy_dir : str, optional
-        If provided, copy the found photograph to this directory
-    tqdm_handle : tqdm, optional
-        tqdm progress bar handle for logging output
-    
-    Returns
-    -------
-    str or None
-        Path to the photograph file (or copied file if copy_dir specified), 
-        or None if no photograph found or user cancelled selection
-    """
-
-    # Define logging function
-    log = tqdm_handle.write if tqdm_handle else print
-
-    # Define patient root
-    patient_root = os.path.join(picture_root, patient_id)
-    if not os.path.exists(patient_root):
-        raise FileNotFoundError(f"Patient directory not found: {patient_root}")
-
-    # Check for "raw" subdirectory
-    if os.path.exists(os.path.join(patient_root, "raw")):
-        patient_root = os.path.join(patient_root, "raw")
-
-    # Check expected path, take that one if exists
-    expected_paths = [
-        os.path.join(patient_root, f"{patient_id}_postresection.jpg"),
-        os.path.join(patient_root, f"{patient_id}_Postresection.jpg"),
-        os.path.join(patient_root, f"{patient_id}_post.jpg"),
-        os.path.join(patient_root, f"{patient_id}_Post.jpg")
-    ]
-    for expected_path in expected_paths:
-        if os.path.exists(expected_path):
-            # Optionally copy
-            if copy_dir:
-                dest_path = os.path.join(copy_dir, f"{patient_id}_post_resection_photo.jpg")
-                shutil.copy2(expected_path, dest_path)
-                return dest_path
-            # Else, just return path
-            return expected_path
-
-    # Else, search further: Define search pattern and find files
-    search_pattern_1 = os.path.join(patient_root, f"*post*.jpg")
-    search_pattern_2 = os.path.join(patient_root, f"*Post*.jpg")
-    search_pattern_3 = os.path.join(patient_root, f"*post*.png")
-    search_pattern_4 = os.path.join(patient_root, f"*Post*.png")
-    matching_files = glob.glob(search_pattern_1) + glob.glob(search_pattern_2) + glob.glob(search_pattern_3) + glob.glob(search_pattern_4)
-    if len(matching_files) == 1:
-        matching_file = matching_files[0]
-    else:
-        # Prompt user to select image if multiple or none found
-        log(f"Could not uniquely identify photograph for patient ID {patient_id}.")
-        log(f"Please select the correct photograph file from the dialog.")
-        # Open dialog
-        root = tk.Tk()
-        root.withdraw()  # hide main window
-        root.attributes("-topmost", True)  # bring dialog to front
-        # Ask user to select file
-        matching_file = filedialog.askopenfilename(
-            title=f"Select post-resection photograph for patient {patient_id}",
-            initialdir=patient_root,
-            filetypes=[("All files", "*.*"), ("JPEG files", "*.jpg *.jpeg"), ("PNG files", "*.png")]
-        )
-        if not matching_file:
-            log("No file selected. Aborting patient.")
-            return None
-
-    # Optionally copy
-    if copy_dir:
-        dest_path = os.path.join(copy_dir, f"{patient_id}_post_resection_photo.jpg")
-        shutil.copy2(matching_file, dest_path)
-        return dest_path
-    # Else, just return path
-    else:
-        return matching_file
 
 def _discover_image_files(photo_dir):
     """List image files under a patient photo directory."""
@@ -279,11 +450,12 @@ def build_photo_set_from_selection(patient_id, patient_photo_dir, manifest_path=
 
 
 def discover_photo_set(patient_id, picture_root, patient_photo_dir=None, manifest_path=None):
-    """Compatibility wrapper returning the patient photo set.
+    """Returns the patient photo set.
 
-    If a patient has multiple photos and no manifest is available, the user is
-    asked to select the reference and secondary images interactively so the
-    photo-set manifest is constructed on-the-fly.
+    `manifest_path` is the single manifest location (typically the patient's
+    output directory), used both to reuse a previous selection and, when a
+    patient has multiple photos and no manifest exists yet, as the destination
+    for the interactively-constructed photo-set manifest.
     """
     if patient_photo_dir is None:
         patient_photo_dir = os.path.join(picture_root, patient_id)
@@ -291,22 +463,13 @@ def discover_photo_set(patient_id, picture_root, patient_photo_dir=None, manifes
     if not os.path.isdir(patient_photo_dir):
         patient_photo_dir = os.path.join(picture_root, patient_id)
 
-    manifest_candidates = []
-    if manifest_path:
-        manifest_candidates.append(manifest_path)
-    manifest_candidates.extend([
-        os.path.join(patient_photo_dir, "photos.yaml"),
-        os.path.join(patient_photo_dir, "photos.yml"),
-        os.path.join(patient_photo_dir, "photos.json"),
-    ])
-    for candidate in manifest_candidates:
-        if candidate and os.path.exists(candidate):
-            return discover_patient_photo_set(
-                patient_id=patient_id,
-                patient_photo_dir=patient_photo_dir,
-                picture_root=picture_root,
-                manifest_path=candidate,
-            )
+    if manifest_path and os.path.exists(manifest_path):
+        return discover_patient_photo_set(
+            patient_id=patient_id,
+            patient_photo_dir=patient_photo_dir,
+            picture_root=picture_root,
+            manifest_path=manifest_path,
+        )
 
     photo_files = _discover_image_files(patient_photo_dir)
     if not photo_files:
@@ -319,8 +482,6 @@ def discover_photo_set(patient_id, picture_root, patient_photo_dir=None, manifes
             manifest_path=None,
         )
 
-    if not manifest_path:
-        manifest_path = os.path.join(patient_photo_dir, "photos.yaml")
     photo_set = build_photo_set_from_selection(
         patient_id=patient_id,
         patient_photo_dir=patient_photo_dir,
