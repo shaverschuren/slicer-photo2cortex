@@ -5,9 +5,9 @@ rotation utilities, and VTK polydata operations.
 
 import os
 import numpy as np
-import vtk
-from vtkmodules.util import numpy_support
-import slicer
+import vtk  # type: ignore
+from vtkmodules.util import numpy_support  # type: ignore
+import slicer  # type: ignore
 
 
 def vtkMatrixToNumpy(vtkMat):

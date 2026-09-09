@@ -5,8 +5,8 @@ and envelope creation.
 
 import os
 import subprocess
-import vtk
-import slicer
+import vtk  # type: ignore
+import slicer  # type: ignore
 
 
 def ras_to_lps_polydata(polyData):
