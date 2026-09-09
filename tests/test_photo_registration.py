@@ -120,3 +120,44 @@ def test_register_photo_set_does_not_warp_masks_when_registration_pending(monkey
 
     assert aux.registration_status == "registration_pending"
     assert "registered_path" not in aux.masks
+
+
+def test_register_photo_set_reuses_valid_cached_registration(monkeypatch, tmp_path):
+    registered_image_path = tmp_path / "aux_registered.png"
+    registered_image_path.write_bytes(b"registered")
+    result_path = tmp_path / "aux_registration.json"
+    cached_result = pr.PhotoRegistrationResult(
+        reference_photo_id="ref",
+        moving_photo_id="aux",
+        method=pr.PhotoRegistrationMethod.PROJECTIVE_8DOF,
+        status="registered",
+        source_image_path="aux.jpg",
+        reference_image_path="ref.jpg",
+        registered_image_path=str(registered_image_path),
+        reference_dimensions=(8, 8),
+        transform=np.eye(3).tolist(),
+    )
+    pr.save_registration_result(str(result_path), cached_result)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("a valid cached registration should be reused")
+
+    monkeypatch.setattr(pr, "register_photo_to_reference", fail_if_called)
+
+    reference = PhotoRecord(photo_id="ref", source_path="ref.jpg", role="reference")
+    aux = PhotoRecord(
+        photo_id="aux",
+        source_path="aux.jpg",
+        role="secondary",
+        registration_method=pr.PhotoRegistrationMethod.PROJECTIVE_8DOF,
+        registration_status="registered",
+        registration_result_path=str(result_path),
+        registered_image_path=str(registered_image_path),
+    )
+    photo_set = PatientPhotoSet(patient_id="P1", reference_photo=reference, secondary_photos=[aux])
+
+    results = pr.register_photo_set(photo_set, str(tmp_path))
+
+    assert len(results) == 1
+    assert results[0].status == "registered"
+    assert results[0].moving_photo_id == "aux"
