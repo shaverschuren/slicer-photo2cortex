@@ -14,8 +14,8 @@ This package groups helper functions for:
 Usage
 -----
 - The software relies on `FreeSurfer` outputs and expects subject directories to follow `FreeSurfer`'s structure.
-- The main entry point is `main_slicer_loop.py`, which loops over patient directories and runs the pipeline. Adjust parameters there as needed.
-- For quicker processing, run `fs_envelope_loop.py` off-line first to precompute surface envelopes (otherwise loading each patient takes ~30s).
+- The main entry point is `photo2cortex.py`, which supports batch and single-subject processing.
+- For quicker processing, set `batch.process_only_envelope: true` to precompute surface envelopes before photo registration.
 - Most of the code is meant to be run within 3D Slicer's Python environment, which is handled automatically by the batch scripts.
 
 Notes

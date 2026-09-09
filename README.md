@@ -109,19 +109,25 @@ Additional dependencies (installed automatically when needed):
 Before running the scripts, you need to configure the paths to your data and software:
 
 1. **Copy the configuration template**:
-   - The first time you run `main_slicer_loop.py`, it will create a `config.yaml` file
+  - The first time you run `photo2cortex.py`, it will create a `config.yaml` file
    - Alternatively, copy `config_template.yaml` to `config.yaml`
 
 2. **Edit `config.yaml`** with your system paths:
    ```yaml
    slicer_exe_path: C:\Path\To\Slicer.exe
-   mri_data_dir: C:\Path\To\FreeSurfer\Subjects\Directory
-  photo_data_dir: C:\Path\To\Photographs\Root\Directory
+   photo_data_dir: C:\Path\To\Photographs\Root\Directory
+   batch:
+     mri_data_dir: C:\Path\To\FreeSurfer\Subjects\Directory
+     subject_dir_regex: RESP*
+     reprocess: false
+     process_only_photo: false
+    process_only_envelope: false
    ```
 
    - `slicer_exe_path`: Full path to the Slicer executable
-   - `mri_data_dir`: Root directory containing FreeSurfer subject folders (e.g., `RESP0001`, `RESP0002`, etc.)
   - `photo_data_dir`: Root directory containing corresponding photograph folders
+  - `batch.mri_data_dir`: Root directory containing FreeSurfer subject folders (e.g., `RESP0001`, `RESP0002`, etc.)
+  - `batch.subject_dir_regex`: Pattern used to discover batch subjects
 
 ## Usage
 
@@ -129,17 +135,34 @@ Before running the scripts, you need to configure the paths to your data and sof
 
 The typical workflow consists of two main steps:
 
-1. **Pre-compute Surface Envelopes** (Optional but Recommended):
+1. **Run the workflow**:
    ```python
-   python fs_envelope_loop.py
+  python photo2cortex.py
    ```
-   This pre-generates envelope STL files for all patients. Without this step, envelopes are created on-the-fly, adding ~30 seconds per patient.
+  This opens 3D Slicer for each subject to perform manual photo-to-MRI registration.
 
-2. **Run Manual Registration Loop**:
-   ```python
-   python main_slicer_loop.py
-   ```
-   This opens 3D Slicer for each patient to perform manual photo-to-MRI registration.
+  Processing modes are controlled in `config.yaml`: set
+  `batch.process_only_envelope: true` to generate only FreeSurfer envelopes,
+  `batch.process_only_photo: true` to prepare photographs without opening
+  Slicer, or `batch.reprocess: true` to rerun subjects that would be skipped.
+  The envelope-only setting precomputes the surface files used by photo registration.
+
+  ### Batch processing
+
+  ```bash
+  python photo2cortex.py
+  ```
+
+  Processes subjects matching the batch configuration in `config.yaml`.
+
+  ### Single-subject processing
+
+  ```bash
+  python photo2cortex.py /path/to/RESP0123
+  ```
+
+  Processes only the supplied FreeSurfer subject directory. The subject does not
+  need to live underneath the configured batch MRI directory.
 
 ### Photo set / reference workflow
 
@@ -172,27 +195,22 @@ If a patient contains exactly one usable photograph and no manifest, that single
 
 #### Step 1: Envelope Generation (Optional)
 
-Run this first to save time during the main registration process:
+Set `batch.process_only_envelope: true` in `config.yaml`, then run:
 
 ```python
-python fs_envelope_loop.py
+python photo2cortex.py
 ```
 
-This script:
-- Scans for FreeSurfer patient directories (matching `RESP*` pattern)
-- Opens Slicer in no-main-window mode for each patient
-- Calls MATLAB's `create_envelopes.m` to generate:
-  - `lh_envelope.stl` - Left hemisphere envelope
-  - `rh_envelope.stl` - Right hemisphere envelope  
-  - `brain_envelope.stl` - Whole brain envelope
-- Skips patients that already have envelopes
+This generates `lh_envelope.stl`, `rh_envelope.stl`, and `brain_envelope.stl`
+for configured subjects. Existing envelopes are skipped unless
+`batch.reprocess: true` is enabled.
 
 #### Step 2: Photo Registration
 
 Run the main registration loop:
 
 ```python
-python main_slicer_loop.py
+python photo2cortex.py
 ```
 
 This script:
@@ -255,8 +273,7 @@ import optimizer
 photo2cortex/
 ├── __init__.py                 # Package initialization and documentation
 ├── config_template.yaml        # Configuration template
-├── main_slicer_loop.py        # Main entry point for registration workflow
-├── fs_envelope_loop.py        # Pre-compute envelopes for all patients
+├── photo2cortex.py            # Main entry point for registration workflow
 ├── slicer_script.py           # Slicer automation script (runs inside Slicer)
 ├── photo_preparation.py      # Photo preprocessing and file handling
 ├── surf2vol.py                # Surface-to-volume projection utilities
@@ -277,8 +294,7 @@ photo2cortex/
 
 ### Module Descriptions
 
-- **main_slicer_loop.py**: Orchestrates the batch processing workflow, loading configuration and iterating through patients
-- **fs_envelope_loop.py**: Standalone script to pre-generate surface envelopes
+- **photo2cortex.py**: Orchestrates batch and single-subject processing
 - **slicer_script.py**: Executed inside Slicer's Python environment to set up the registration scene
 - **photo_preparation.py**: Handles photograph file discovery, copying, and preprocessing
 - **surf2vol.py**: Converts FreeSurfer surface masks to volumetric representations
@@ -334,7 +350,7 @@ photo_data_dir/
   
 ### Performance Tips
 
-- **Pre-compute Envelopes**: Run `fs_envelope_loop.py` first to avoid 30-second delays per patient
+- **Pre-compute Envelopes**: Set `batch.process_only_envelope: true` and run `photo2cortex.py` to avoid 30-second delays per patient
 - **Batch Processing**: The scripts are designed for batch processing; configure all paths once and process multiple patients efficiently
 
 ### Platform Notes

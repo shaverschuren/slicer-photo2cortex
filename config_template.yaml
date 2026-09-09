@@ -1,7 +1,9 @@
 slicer_exe_path: C:\\Path\\To\\Slicer.exe
-mri_data_dir: C:\\Path\\To\\MRI\\Data\\Directory
 photo_data_dir: C:\\Path\\To\\Photograph\\Data\\Directory
-# Optional patient-level manifest support for multi-photo patients.
-# If a patient contains exactly one photograph and no manifest exists, that image
-# becomes the reference automatically. If multiple photographs exist, add a
-# photos.yaml or photos.json file with exactly one entry marked as reference.
+batch:
+	mri_data_dir: C:\\Path\\To\\FreeSurfer\\Subjects
+	subject_dir_regex: RESP*
+	reprocess: false
+	process_only_photo: false
+	process_only_envelope: false
+  process_only_envelope: false

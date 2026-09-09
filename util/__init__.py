@@ -11,7 +11,7 @@ This package is organized into focused modules:
 `io`, `geometry`, `projection`, and `interaction` require Slicer's `vtk`/`slicer`
 modules and are only importable from within 3D Slicer. `photo_registration` has
 no such dependency and remains importable from a plain Python environment (e.g.
-`main_slicer_loop.py`), so the Slicer-only imports below are best-effort.
+`photo2cortex.py`), so the Slicer-only imports below are best-effort.
 """
 
 __all__ = []

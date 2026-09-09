@@ -2,7 +2,7 @@
 
 This enables appropriate skipping logic etc with multiple projections.
 This module has no dependency on `slicer`/`vtk`/`qt` so it can be imported both
-from ordinary Python (`main_slicer_loop.py`) and from inside 3D Slicer
+from ordinary Python (`photo2cortex.py`) and from inside 3D Slicer
 (`slicer_script.py`). Completion here means "every selected photograph has a
 projected brain-envelope representation".
 """
