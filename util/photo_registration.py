@@ -190,23 +190,30 @@ def register_photo_to_reference(moving_photo: Any, reference_photo: Any, method:
 
 
 def register_photo_set(photo_set: PatientPhotoSet, output_dir: str, method: Optional[Union[str, PhotoRegistrationMethod]] = None) -> List[PhotoRegistrationResult]:
-    """Register all non-reference photos into the reference grid."""
+    """Register all non-reference photos into the reference grid.
+
+    A per-photo `registration_method` recorded on the manifest always takes
+    precedence over the `method` argument, which is only used as a fallback
+    default for photos that do not specify one.
+    """
     os.makedirs(output_dir, exist_ok=True)
+    default_method = method or PhotoRegistrationMethod.PROJECTIVE_8DOF
     results = []
     for photo in photo_set.all_photos()[1:]:
+        photo_method = photo.registration_method or default_method
         output_path = os.path.join(output_dir, f"{photo.photo_id}_registered.png")
         try:
             result = register_photo_to_reference(
                 photo,
                 photo_set.reference_photo,
-                method=method or PhotoRegistrationMethod.PROJECTIVE_8DOF,
+                method=photo_method,
                 output_path=output_path,
             )
         except (ImportError, OSError, ValueError, RuntimeError) as exc:
             result = PhotoRegistrationResult(
                 reference_photo_id=photo_set.reference_photo.photo_id,
                 moving_photo_id=photo.photo_id,
-                method=_normalise_registration_method(method),
+                method=_normalise_registration_method(photo_method),
                 status="registration_pending",
                 source_image_path=photo.source_path,
                 reference_image_path=photo_set.reference_photo.source_path,
@@ -217,6 +224,16 @@ def register_photo_set(photo_set: PatientPhotoSet, output_dir: str, method: Opti
         photo.registered_image_path = result.registered_image_path
         photo.registration_result_path = os.path.join(output_dir, f"{photo.photo_id}_registration.json")
         save_registration_result(photo.registration_result_path, result)
+
+        mask_path = photo.masks.get("path") if photo.masks else None
+        if result.status == "registered" and mask_path and os.path.exists(mask_path):
+            try:
+                registered_mask_path = os.path.join(output_dir, f"{photo.photo_id}_registered_masks.npz")
+                warp_mask_file_to_reference(mask_path, result, registered_mask_path)
+                photo.masks["registered_path"] = registered_mask_path
+            except (NotImplementedError, ImportError, OSError, ValueError) as exc:
+                print(f"[photo_registration] Could not warp masks for '{photo.photo_id}' into the reference grid: {exc}")
+
         results.append(result)
     return results
 
@@ -227,8 +244,47 @@ def warp_image_to_reference(moving_image: Any, registration: PhotoRegistrationRe
 
 
 def warp_mask_to_reference(mask: Any, registration: PhotoRegistrationResult, **kwargs: Any) -> Any:
-    """Warp a mask into the reference-photo grid using the same registration result."""
-    raise NotImplementedError("warp_mask_to_reference is not implemented yet; the API is prepared for later warping support.")
+    """Warp a boolean mask into the reference-photo grid using the same registration result.
+
+    Only the projective (homography) method is currently implemented, matching
+    the only registration algorithm that is actually implemented. Masks are
+    warped with nearest-neighbour interpolation so boolean ROI/label pixels are
+    preserved exactly rather than blurred at the boundary.
+    """
+    if registration.method != PhotoRegistrationMethod.PROJECTIVE_8DOF:
+        raise NotImplementedError(
+            f"Mask warping is only implemented for {PhotoRegistrationMethod.PROJECTIVE_8DOF.value}; "
+            f"got {registration.method.value}."
+        )
+    if registration.transform is None:
+        raise ValueError("Registration result has no transform to warp masks with.")
+    if registration.reference_dimensions is None:
+        raise ValueError("Registration result has no reference image dimensions to warp masks to.")
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("OpenCV is required for projective mask warping.") from exc
+
+    transform = np.asarray(registration.transform, dtype=np.float64)
+    width, height = registration.reference_dimensions
+    mask_uint8 = np.asarray(mask).astype(np.uint8)
+    warped = cv2.warpPerspective(mask_uint8, transform, (width, height), flags=cv2.INTER_NEAREST)
+    return warped.astype(bool)
+
+
+def warp_mask_file_to_reference(mask_path: str, registration: PhotoRegistrationResult, output_path: str) -> str:
+    """Warp a saved `.npz` mask file (resection_mask/outside_mask) into the reference grid and save it."""
+    with np.load(mask_path) as masks:
+        warped = {
+            name: warp_mask_to_reference(masks[name], registration)
+            for name in masks.files
+        }
+    directory = os.path.dirname(output_path)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+    np.savez_compressed(output_path, **warped)
+    return output_path
 
 
 def transform_points_to_reference(points: Any, registration: PhotoRegistrationResult, **kwargs: Any) -> Any:

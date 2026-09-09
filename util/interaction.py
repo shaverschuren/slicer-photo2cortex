@@ -3,16 +3,19 @@ UI, camera, and interaction handling for 3D Slicer.
 """
 
 import sys
+import os
 import numpy as np
 import vtk
 import qt  # type: ignore
 import ctk  # type: ignore
 import slicer
-import os
 import surf2vol
 import optimizer
-from .geometry import get_poly_normals, vtkMatrixToNumpy, numpyToVtkMatrix, extractRotationScale, rotationFromVectors
-from .io import save_scene_to_directory
+from .geometry import get_poly_normals, vtkMatrixToNumpy, numpyToVtkMatrix, extractRotationScale, rotationFromVectors, clone_model_node, load_photo_masks
+from .io import save_scene_to_directory, load_photo_volume
+from .projection import Projection, create_textured_plane
+from .photo_state import PhotoProjectionState
+from .projection_manifest import PROJECTION_MANIFEST_FILENAME, build_projection_manifest, save_projection_manifest
 
 
 def center_camera_on_projection(Nodes):
@@ -246,7 +249,7 @@ def setup_interactive_transform(transformNode, visibility=True, limit_to_surf_al
         displayNode.Visibility2DOff()
 
 def setup_ui_widgets(MainProjection, transformObserver, transformNode,
-                     min_mm=1.0, max_mm=300.0, initial_mm=150.0):
+                     min_mm=1.0, max_mm=300.0, initial_mm=150.0, photo_states=None):
     """
     Create a 'Projector Control' dock widget for controlling projection settings.
     
@@ -256,7 +259,8 @@ def setup_ui_widgets(MainProjection, transformObserver, transformNode,
     Parameters
     ----------
     MainProjection : Projection
-        The projection object to control
+        The reference photo's projection object; used to read back the current
+        camera distance for the slider.
     transformObserver : PhotoTransformObserver
         The transform observer that handles dragging constraints
     transformNode : vtkMRMLLinearTransformNode
@@ -267,6 +271,10 @@ def setup_ui_widgets(MainProjection, transformObserver, transformNode,
         Maximum camera distance in mm. Defaults to 300.0
     initial_mm : float, optional
         Initial camera distance in mm. Defaults to 150.0
+    photo_states : dict, optional
+        Mapping of photo_id -> PhotoProjectionState. All projections share the
+        same reference geometry, so changing the camera distance updates every
+        materialised photo projection, not just the reference photo's.
     
     Returns
     -------
@@ -314,7 +322,11 @@ def setup_ui_widgets(MainProjection, transformObserver, transformNode,
 
     # --- Slider connection ---
     def onValueChanged(value):
-        MainProjection.set_cam_distance(value)
+        if photo_states:
+            for state in photo_states.values():
+                state.projection.set_cam_distance(value)
+        else:
+            MainProjection.set_cam_distance(value)
     slider.connect('valueChanged(double)', onValueChanged)
 
     # --- External update timer ---
@@ -386,7 +398,199 @@ def setup_ui_widgets(MainProjection, transformObserver, transformNode,
 
     return slider, toggle, depthSlider, includeWM, dockWidget
 
-def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transformObserver, output_dir):
+
+def _resolve_auxiliary_photo_paths(entry):
+    """Return (image_path, mask_path) for a non-reference photo entry, or (None, None) if unresolved."""
+    if str(entry.get("registration_status") or "") != "registered":
+        return None, None
+    image_path = entry.get("registered_image_path")
+    if not image_path or not os.path.exists(image_path):
+        return None, None
+    masks = entry.get("masks") or {}
+    mask_path = masks.get("registered_path") or masks.get("path")
+    if mask_path and not os.path.exists(mask_path):
+        mask_path = None
+    return image_path, mask_path
+
+
+def ensure_photo_projection_state(photo_id, role, photo_type, image_path, mask_path,
+                                  transformNode, plane_dims, cam_dist_mm, proj_slab_thickness_mm,
+                                  baseEnvelopeNode, photo_states, visible=False):
+    """Materialise (or refresh) the plane + projected envelope for one photograph.
+
+    Idempotent: if `photo_id` is already present in `photo_states`, the existing
+    nodes are refreshed in place rather than duplicated.
+    """
+    if photo_id in photo_states:
+        state = photo_states[photo_id]
+        state.projection.update()
+        return state
+
+    volumeNode = load_photo_volume(image_path, node_name=f"PhotoVolume__{photo_id}")
+    if mask_path:
+        load_photo_masks(mask_path, volumeNode)
+
+    planeNode, _flip = create_textured_plane(
+        volumeNode, planeName=f"PhotoPlane__{photo_id}", width=plane_dims[0], height=plane_dims[1], opacity=0.6
+    )
+    planeNode.SetAndObserveTransformNodeID(transformNode.GetID())
+    planeNode.GetDisplayNode().SetVisibility(False)
+
+    envelopeNode = clone_model_node(
+        baseEnvelopeNode, f"ProjectedEnvelope__{photo_id}", opacity=0.8, visibility=visible
+    )
+    projection = Projection(
+        envelopeNode, volumeNode, transformNode, plane_dims,
+        proj_slab_thickness_mm=proj_slab_thickness_mm, cam_dist_mm=cam_dist_mm,
+        rgb=True, visualize_camera=False
+    )
+    projection.displayNode.SetVisibility(visible)
+
+    state = PhotoProjectionState(
+        photo_id=photo_id, role=role, photo_type=photo_type, image_path=image_path,
+        volume_node=volumeNode, plane_node=planeNode, envelope_node=envelopeNode, projection=projection
+    )
+    photo_states[photo_id] = state
+    return state
+
+
+def finalize_photo_projections(photo_context):
+    """Materialise/update every selected photo's plane + projected envelope (the 'f' action).
+
+    This only projects the photos; it does not touch the scene file or the
+    projection manifest (see `save_photo_projection_scene` for that). Marks
+    `photo_context['finalized'] = True` on success so 's' can warn if it is
+    pressed before 'f' has ever run in this session.
+
+    `photo_context` is a dict with keys:
+      - 'manifest_photos': list of photo-set manifest entries (dicts)
+      - 'reference_photo_id': id of the reference photo
+      - 'photo_states': mutable dict photo_id -> PhotoProjectionState (already
+        contains the reference photo's state)
+      - 'transform_node', 'base_envelope_node', 'plane_dims'
+
+    Returns the list of unresolved photo ids (registered but not yet projected).
+    """
+    manifest_photos = photo_context["manifest_photos"]
+    reference_photo_id = photo_context["reference_photo_id"]
+    photo_states = photo_context["photo_states"]
+    transformNode = photo_context["transform_node"]
+    baseEnvelopeNode = photo_context["base_envelope_node"]
+    plane_dims = photo_context["plane_dims"]
+
+    reference_state = photo_states.get(reference_photo_id)
+    if reference_state is None:
+        raise RuntimeError("Reference photo projection state is missing; cannot finalise.")
+    cam_dist_mm = reference_state.projection.cam_dist_mm
+    proj_slab_thickness_mm = reference_state.projection.proj_slab_thickness_mm
+
+    unresolved_photo_ids = []
+    for entry in manifest_photos:
+        photo_id = str(entry.get("id"))
+        if photo_id == str(reference_photo_id):
+            reference_state.projection.update()
+            continue
+
+        image_path, mask_path = _resolve_auxiliary_photo_paths(entry)
+        if image_path is None:
+            print(f"[Finalize] Photo '{photo_id}' is not yet registered into the reference grid; skipping projection.")
+            unresolved_photo_ids.append(photo_id)
+            continue
+
+        ensure_photo_projection_state(
+            photo_id=photo_id, role=entry.get("role", "secondary"), photo_type=entry.get("photo_type"),
+            image_path=image_path, mask_path=mask_path, transformNode=transformNode, plane_dims=plane_dims,
+            cam_dist_mm=cam_dist_mm, proj_slab_thickness_mm=proj_slab_thickness_mm,
+            baseEnvelopeNode=baseEnvelopeNode, photo_states=photo_states, visible=False,
+        )
+
+    # Reference projection stays visible by default; everything else defaults hidden.
+    for photo_id, state in photo_states.items():
+        is_reference = str(photo_id) == str(reference_photo_id)
+        state.envelope_node.GetDisplayNode().SetVisibility(is_reference)
+        state.projection.displayNode.SetVisibility(is_reference)
+
+    photo_context["unresolved_photo_ids"] = unresolved_photo_ids
+    photo_context["finalized"] = True
+
+    if unresolved_photo_ids:
+        print(
+            f"[Finalize] Projected {len(photo_states)} photo(s); {len(unresolved_photo_ids)} unresolved: "
+            f"{', '.join(unresolved_photo_ids)}. Press 's' to save what is ready."
+        )
+    else:
+        print(f"[Finalize] Projected all {len(photo_states)} selected photo(s). Press 's' to save.")
+
+    return unresolved_photo_ids
+
+
+def save_photo_projection_scene(Nodes, photo_context, output_dir):
+    """Save the Slicer scene and write the projection manifest (the 's' action).
+
+    Assumes `finalize_photo_projections` ('f') has already materialised the
+    photo projections; the caller (see `setup_interactor`) is responsible for
+    warning the user if that has not happened yet in this session.
+
+    Returns the projection-manifest dict that was saved.
+    """
+    reference_photo_id = photo_context["reference_photo_id"]
+    photo_states = photo_context["photo_states"]
+    transformNode = photo_context["transform_node"]
+    plane_dims = photo_context["plane_dims"]
+    unresolved_photo_ids = photo_context.get("unresolved_photo_ids", [])
+
+    reference_state = photo_states.get(reference_photo_id)
+    if reference_state is None:
+        raise RuntimeError("Reference photo projection state is missing; cannot save.")
+    cam_dist_mm = reference_state.projection.cam_dist_mm
+    proj_slab_thickness_mm = reference_state.projection.proj_slab_thickness_mm
+
+    scene_path = os.path.join(output_dir, "scene")
+    scene_saved = save_scene_to_directory(scene_path, Nodes, photo_states=photo_states)
+
+    vtkMat = vtk.vtkMatrix4x4()
+    transformNode.GetMatrixTransformToWorld(vtkMat)
+    reference_transform_matrix = vtkMatrixToNumpy(vtkMat).tolist()
+
+    geometry = {
+        "plane_dims": list(plane_dims),
+        "camera_distance_mm": cam_dist_mm,
+        "projection_slab_thickness_mm": proj_slab_thickness_mm,
+        "reference_transform_matrix": reference_transform_matrix,
+    }
+    projections = [
+        {
+            "photo_id": state.photo_id,
+            "role": state.role,
+            "photo_type": state.photo_type,
+            "image_path": state.image_path,
+            "plane_node_name": state.plane_node_name,
+            "envelope_node_name": state.envelope_node_name,
+        }
+        for state in photo_states.values()
+    ]
+
+    manifest = build_projection_manifest(
+        reference_photo_id=str(reference_photo_id),
+        scene_path=scene_path if scene_saved else None,
+        geometry=geometry,
+        projections=projections,
+        unresolved_photo_ids=unresolved_photo_ids,
+    )
+    manifest_path = os.path.join(output_dir, PROJECTION_MANIFEST_FILENAME)
+    save_projection_manifest(manifest, manifest_path)
+
+    if manifest["status"] == "complete":
+        print(f"[Save] Projection set complete for {len(projections)} photo(s). Saved to {scene_path}")
+    else:
+        print(
+            f"[Save] Projection set INCOMPLETE ({len(unresolved_photo_ids)} unresolved photo(s)): "
+            f"{', '.join(unresolved_photo_ids) if unresolved_photo_ids else 'scene save failed'}"
+        )
+
+    return manifest
+
+def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transformObserver, output_dir, photo_context=None):
     """
     Install keypress handlers on all 3D and slice view interactors.
 
@@ -399,10 +603,11 @@ def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transfo
     - 'space': Center camera on projection plane
     - 'Return': Align projection plane to current camera view
     - 'a': Auto-align projection plane (experimental)
-    - 'v': Create volumetric resection mask from aligned surfaces
-    - 's': Save scene and resection mask
-    - 'q': Quit Slicer
-    - 'x': Mark as atlas-based and quit Slicer
+    - 'v': Optional post-resection-only volumetric resection mask generation
+    - 'f': Finalise the reference alignment and materialise/update all photo projections
+    - 's': Save the scene and projection manifest (warns if 'f' has not been pressed yet)
+    - 'q': Quit Slicer (warns if the projection set has not been saved yet)
+    - 'x': Mark as atlas-based (optional resection metadata) and quit Slicer
     - 'Escape': Quit Slicer and break outside loop
     
     Parameters
@@ -415,11 +620,15 @@ def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transfo
     photo_mask_path : str
         Path to the .npz file containing photo masks
     MainProjection : Projection
-        The projection object handling photo projection
+        The reference photo's projection object
     transformObserver : PhotoTransformObserver
         The transform observer managing dragging constraints
     output_dir : str
         Directory for saving output files
+    photo_context : dict, optional
+        Shared-geometry photo context (see `finalize_photo_projections`). Required
+        for 'f' to materialise auxiliary/post-resection projections and for 'v' to
+        find the post-resection projected envelope.
     """
 
     # Get app
@@ -427,6 +636,7 @@ def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transfo
 
     # Initialize quit flag
     quit_once = False
+    save_without_finalize_warned = False
 
     # Set up keypress observer
     def onKeyPress(interactor):
@@ -484,13 +694,25 @@ def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transfo
                 Nodes['rh_envelopeNode'], plane_dims, photo_mask_path, MainProjection
                 )
 
-        # Make volumetric resection mask from aligned surfaces.
+        # Optional post-resection-only volumetric resection mask, with "v" key
         elif key == "v":
-            # Generate segmentation from ribbon and brain envelope
+            post_resection_id = (photo_context or {}).get("post_resection_photo_id")
+            photo_states = (photo_context or {}).get("photo_states", {})
+            if not post_resection_id:
+                print("[surf2vol] No post-resection photo in this photo set; nothing to do.")
+                return
+            post_resection_state = photo_states.get(post_resection_id)
+            if post_resection_state is None:
+                print(
+                    f"[surf2vol] Post-resection photo '{post_resection_id}' has not been projected yet. "
+                    "Press 'f' first to finalise the photo projections."
+                )
+                return
+            # Generate segmentation from ribbon and the post-resection projected envelope
             depth = globals().get('surf2vol_depth_mm', 20)
             include_wm = globals().get('surf2vol_include_wm', True)
             segmentationNode = surf2vol.project_surface_to_volume_mask(
-                Nodes["brain_envelopeNode"], Nodes["ribbonNode"], max_depth_mm=depth, include_wm=include_wm
+                post_resection_state.envelope_node, Nodes["ribbonNode"], max_depth_mm=depth, include_wm=include_wm
             )
             # Store globally for access
             globals()['segmentationNode'] = segmentationNode
@@ -498,45 +720,53 @@ def setup_interactor(Nodes, plane_dims, photo_mask_path, MainProjection, transfo
             # Set opacity for visualization
             Nodes['lh_pialNode'].GetDisplayNode().SetOpacity(0.3)
             Nodes['rh_pialNode'].GetDisplayNode().SetOpacity(0.3)
-            Nodes['brain_envelopeNode'].GetDisplayNode().SetOpacity(0.4)
-        # Save resection curve with "s" key
+            post_resection_state.envelope_node.GetDisplayNode().SetOpacity(0.4)
+        # Finalise the reference alignment and project all selected photos with "f" key
+        elif key == "f":
+            if photo_context is None:
+                print("[Finalize] No photo context available; cannot finalise photo projections.")
+                return
+            finalize_photo_projections(photo_context)
+        # Save the scene and projection manifest with "s" key
         elif key == "s":
+            if photo_context is None:
+                print("[Save] No photo context available; cannot save photo projections.")
+                return
+            nonlocal save_without_finalize_warned
+            if not photo_context.get("finalized"):
+                if not save_without_finalize_warned:
+                    print("[Save] You haven't pressed 'f' yet to finalise/project the photos in this session.")
+                    print("Press 'f' first, or press 's' again to save anyway.")
+                    save_without_finalize_warned = True
+                    return
+                print("[Save] Saving without having finalised photo projections.")
+            save_photo_projection_scene(Nodes, photo_context, output_dir)
             segmentationNode = Nodes.get('segmentationNode', None)
             if segmentationNode:
-                # Save resection mask to output directory
                 output_nifti_path = os.path.join(output_dir, "photo2cortex_resection_mask.nii.gz")
                 surf2vol.save_resection_mask(segmentationNode, output_nifti_path)
-                # Save scene
-                scene_path = os.path.join(output_dir, "scene")
-                save_scene_to_directory(scene_path, Nodes)
-            else:
-                print("No segmentationNode found to save.")
         # Exit program and label as atlas-based mask with "x" key
         elif key == "x":
-            # Label subject as atlas-based to come back to later (for lobectomies etc.)
+            # Label subject as using an atlas-based resection mask (optional resection metadata only;
+            # this does not by itself mark the general photo-projection workflow as complete).
             with open(os.path.join(output_dir, "atlas_based.txt"), "w") as f:
                 f.write("This subject uses an atlas-based resection mask.\n")
             # Quit app
             sys.exit(0)
         # Exit program with "q" key
         elif key == "q":
-            # Check whether to save before quitting
-            segmentationNode = Nodes.get('segmentationNode', None)
-            if segmentationNode and not (
-                os.path.exists(os.path.join(output_dir, "photo2cortex_resection_mask.nii.gz")) \
-                and os.path.exists(os.path.join(output_dir, "scene"))
-            ):
+            # Check whether the current projection set has been saved
+            manifest_path = os.path.join(output_dir, PROJECTION_MANIFEST_FILENAME)
+            projection_saved = os.path.exists(manifest_path)
+            if not projection_saved:
                 nonlocal quit_once
                 if not quit_once:
-                    print("Don't forget to save your resection mask and scene before quitting! (press 's')")
+                    print("Don't forget to finalise ('f') and save ('s') your photo projections before quitting!")
                     print("Press 'q' again to quit without saving.")
                     quit_once = True
                 else:
                     print("Exiting application without saving.")
                     sys.exit(1)
-            elif not segmentationNode:
-                print("Exiting without results to save.")
-                sys.exit(1)
             else:
                 print("Exiting application.")
                 sys.exit(0)

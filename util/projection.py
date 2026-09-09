@@ -9,6 +9,65 @@ import slicer
 from .geometry import subdivide_model
 
 
+def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, height=120.0, opacity=0.6):
+    """
+    Create a plane model which will receive the photograph as a texture.
+
+    Parameters
+    ----------
+    photoVolumeNode : vtkMRMLScalarVolumeNode
+        Volume node containing the photograph data
+    planeName : str, optional
+        Name for the created plane model. Defaults to "PhotoPlane"
+    width : float, optional
+        Width of the plane in mm. Defaults to 120.0
+    height : float, optional
+        Height of the plane in mm. Defaults to 120.0
+    opacity : float, optional
+        Opacity of the textured plane (0.0 to 1.0). Defaults to 0.6
+
+    Returns
+    -------
+    tuple
+        (planeNode, flip) - The model node containing the plane and the VTK flip filter
+    """
+    # Create vtkPlaneSource
+    plane = vtk.vtkPlaneSource()
+    plane.SetOrigin(-width/2.0, -height/2.0, 0.0)
+    plane.SetPoint1(width/2.0, -height/2.0, 0.0)
+    plane.SetPoint2(-width/2.0, height/2.0, 0.0)
+    plane.SetXResolution(1)
+    plane.SetYResolution(1)
+    plane.Update()
+
+    # Add as model node
+    planeNode = slicer.modules.models.logic().AddModel(plane.GetOutputPort())
+    planeNode.SetName(planeName)
+
+    # Make semi-transparent
+    displayNode = planeNode.GetModelDisplayNode()
+    displayNode.SetOpacity(opacity)
+    displayNode.SetBackfaceCulling(False)
+    displayNode.SetSelectable(True)
+    displayNode.SetVisibility(False)
+
+    # Texture assignment:
+    # flip image vertically (needed for correct orientation)
+    flip = vtk.vtkImageFlip()
+    flip.SetFilteredAxis(1)  # flip vertical axis
+    # Connect the photo volume image data
+    flip.SetInputConnection(photoVolumeNode.GetImageDataConnection())
+    flip.Update()
+
+    # Connect the flipped image pipeline to model display as texture
+    displayNode.SetTextureImageDataConnection(flip.GetOutputPort())
+
+    # Naming note: the texture is referenced via the display node's connection (not saved as separate node)
+    print("Created textured plane:", planeNode.GetName(), " (texture connected)")
+
+    return planeNode, flip
+
+
 class Projection:
     """
     Handles projection of a 2D photo volume onto a 3D model surface in 3D Slicer.

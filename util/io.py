@@ -57,6 +57,22 @@ def load_stl_surface(stl_path, modelNodeName):
     return modelNode
 
 
+def load_photo_volume(path, node_name=None):
+    """Load a photograph file as a Slicer scalar volume node (used as a projection texture source).
+
+    Used for the reference photo as well as auxiliary/post-resection photos once
+    they are expressed in the reference-photo pixel grid.
+    """
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(f"Photo image not found: {path}")
+    volumeNode = slicer.util.loadVolume(path)
+    if not volumeNode:
+        raise RuntimeError(f"Failed to load photo image as volume: {path}")
+    if node_name:
+        volumeNode.SetName(node_name)
+    return volumeNode
+
+
 def create_envelopes(lh_pialNode, rh_pialNode, surf_dir):
     """Create envelope models from pial surface models and save as STL. Uses external MATLAB script."""
 
@@ -87,8 +103,15 @@ def create_envelopes(lh_pialNode, rh_pialNode, surf_dir):
     return lh_envelopeNode, rh_envelopeNode, brain_envelopeNode
 
 
-def save_scene_to_directory(directory_path, Nodes):
-    """Save the current Slicer scene to a specified directory as a Slicer Data Bundle."""
+def save_scene_to_directory(directory_path, Nodes, photo_states=None):
+    """Save the current Slicer scene to a specified directory as a Slicer Data Bundle.
+
+    `photo_states`, if given, is a dict of photo_id -> PhotoProjectionState. The
+    scene keeps every materialised photo plane/projected envelope so the saved
+    scene reloads with all photo projections available for visibility toggling;
+    only genuinely non-essential temporary nodes (unused hemisphere envelopes,
+    interactive transform handles) are removed or hidden.
+    """
 
     # Import here to avoid circular dependency
     from .interaction import setup_interactive_transform, center_camera_on_projection
@@ -96,13 +119,19 @@ def save_scene_to_directory(directory_path, Nodes):
     print(f"Saving scene to directory: {directory_path}")
 
     # Remove non-essential elements from scene before saving and setup display for saving.
-    slicer.mrmlScene.RemoveNode(Nodes['lh_envelopeNode'])
-    slicer.mrmlScene.RemoveNode(Nodes['rh_envelopeNode'])
+    if Nodes.get('lh_envelopeNode') is not None:
+        slicer.mrmlScene.RemoveNode(Nodes['lh_envelopeNode'])
+    if Nodes.get('rh_envelopeNode') is not None:
+        slicer.mrmlScene.RemoveNode(Nodes['rh_envelopeNode'])
     setup_interactive_transform(Nodes['transformNode'], visibility=False, limit_to_surf_aligned=False)
     Nodes['lh_pialNode'].GetDisplayNode().SetOpacity(0.7)
     Nodes['rh_pialNode'].GetDisplayNode().SetOpacity(0.7)
-    Nodes['brain_envelopeNode'].GetDisplayNode().SetOpacity(0.6)
+    if Nodes.get('brain_envelopeNode') is not None and Nodes['brain_envelopeNode'].GetDisplayNode() is not None:
+        Nodes['brain_envelopeNode'].GetDisplayNode().SetOpacity(0.6)
     center_camera_on_projection(Nodes)
+
+    if photo_states:
+        print(f"Scene includes {len(photo_states)} photo projection(s): {', '.join(sorted(photo_states.keys()))}")
 
     # Make directory if needed
     if not os.path.exists(directory_path):

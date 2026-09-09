@@ -91,6 +91,33 @@ def subdivide_model(modelNode, iterations=1):
     modelNode.SetAndObservePolyData(subdiv.GetOutput())
 
 
+def clone_model_node(sourceNode, new_name, color=None, opacity=1.0, visibility=False):
+    """Create a new model node with a deep copy of `sourceNode`'s polydata.
+
+    Used so that per-photo projected envelopes each own independent polydata:
+    projecting/subdividing one photo's copy can never mutate another photo's
+    copy or the pristine source/template node.
+    """
+    sourcePoly = sourceNode.GetPolyData()
+    if sourcePoly is None:
+        raise RuntimeError(f"Source model '{sourceNode.GetName()}' has no polydata to clone.")
+
+    polyCopy = vtk.vtkPolyData()
+    polyCopy.DeepCopy(sourcePoly)
+
+    newNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", new_name)
+    newNode.SetAndObservePolyData(polyCopy)
+
+    displayNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelDisplayNode")
+    if color is not None:
+        displayNode.SetColor(*color)
+    displayNode.SetOpacity(opacity)
+    displayNode.SetVisibility(visibility)
+    newNode.SetAndObserveDisplayNodeID(displayNode.GetID())
+
+    return newNode
+
+
 def sample_scalar_along_normals(envelopeNode, pialNode, scalarName="curv", rayLength=25.0, attachToEnvelope=True):
     """
     For each point on the envelope surface, cast a ray along the negative normal

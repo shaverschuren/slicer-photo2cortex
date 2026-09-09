@@ -25,6 +25,17 @@ This architecture explicitly separates:
 - secondary photo → reference photo registration (feature-based projective registration)
 - optimizer.py, which remains a future reference-photo→cortex optimisation tool and is not the same as 2D photo-to-photo registration
 
+The workflow endpoint is a **complete set of photo-to-cortex projections** — one projected brain-envelope model per selected photograph, all sharing the exact same reference-photo→cortex geometry (see `photo2cortex_output/projection_manifest.json`). A volumetric post-resection mask remains an optional extra, not the primary output:
+
+```
+photo selection
+  -> masking (outside ROI for every photo; resection ROI only for a post-resection photo)
+  -> auxiliary-to-reference 2D registration
+  -> one manual reference-to-cortex registration
+  -> projection of all photos (one persistent projected envelope each)
+  -> optional post-resection surf2vol
+```
+
 ### Key Features
 
 - **Reference-photo-first workflow**: exactly one photo defines the cortex geometry
@@ -203,13 +214,29 @@ This script:
 
 When Slicer opens for each patient:
 
-1. **View Setup**: The scene loads with MRI, surfaces, and the photo plane
-2. **Transform Control**: Use Slicer's transform widget to align the photo:
+1. **View Setup**: The scene loads with MRI, surfaces, and the reference photo's plane. Only the reference photograph gets an interactively-manipulated plane and transform; auxiliary and post-resection photos never get an independent 3D alignment.
+2. **Transform Control**: Use Slicer's transform widget to align the reference photo:
    - Translate (move position)
    - Rotate (adjust orientation)
    - The photo appears as a textured plane in 3D space
-3. **Volumetric Mask Creation**: Project the now-aligned surface mask to the underlying brain volume
-4. **Export**: Save scene and volumetric resection mask
+3. **Finalise projections**: Press `f` to freeze the current reference-to-cortex geometry and materialise a persistent projected brain-envelope model for every selected, successfully-registered photograph (`ProjectedEnvelope__<photo_id>`). Pressing `f` again updates the existing projections in place rather than duplicating them.
+4. **Optional volumetric mask**: If a post-resection photo was selected, press `v` to project its resection marking into a volumetric mask via `surf2vol` (requires `f` to have been pressed first). If no post-resection photo exists, `v` is a no-op that prints an informative message.
+5. **Export**: Press `s` to save the Slicer scene (as a Slicer Data Bundle) and write `photo2cortex_output/projection_manifest.json`, the explicit completion record used by the outer loop. `s` warns (and requires a second press to proceed) if `f` has not been pressed yet in this session.
+
+Keyboard shortcuts:
+
+| Key | Action |
+| --- | --- |
+| `1` / `2` | Switch to 3D view / red slice view |
+| `space` | Center camera on the reference projection plane |
+| `Return` | Snap the reference plane to the surface point under the current camera |
+| `a` | Experimental auto-align (not stable) |
+| `f` | Finalise the reference alignment and project every selected photo |
+| `s` | Save the scene and projection manifest (warns if `f` has not been pressed) |
+| `v` | Optional post-resection-only volumetric resection mask |
+| `q` | Quit (warns once if the projection set has not been saved) |
+| `x` | Mark as atlas-based (optional resection metadata) and quit |
+| `Escape` | Quit and break the outer patient loop |
 
 ### Advanced: Auto-Alignment (Experimental)
 
@@ -239,7 +266,10 @@ photo2cortex/
 │   ├── io.py                  # Scene and file I/O operations
 │   ├── geometry.py            # Geometry and matrix utilities
 │   ├── projection.py          # Photo projection onto surfaces
-│   └── interaction.py         # UI, camera, and interaction handling
+│   ├── interaction.py         # UI, camera, and interaction handling
+│   ├── photo_state.py         # PhotoProjectionState (plane/envelope/projection per photo)
+│   ├── photo_registration.py  # Photo-to-reference registration + mask warping
+│   └── projection_manifest.py # Explicit photo-projection completion record
 ├── MATLAB/
 │   └── create_envelopes.m     # MATLAB script for envelope creation
 └── .gitignore                 # Git ignore rules
@@ -256,7 +286,10 @@ photo2cortex/
   - **io.py**: Scene and file I/O operations, STL handling, envelope creation
   - **geometry.py**: Matrix conversions, rotation utilities, VTK polydata operations
   - **projection.py**: Photo projection onto 3D surfaces with perspective/orthographic support
-  - **interaction.py**: UI widgets, camera controls, and interactive transform handling
+  - **interaction.py**: UI widgets, camera controls, interactive transform handling, and finalise/save
+  - **photo_state.py**: `PhotoProjectionState`, the per-photo plane/envelope/projection bookkeeping
+  - **photo_registration.py**: Auxiliary-to-reference registration and mask warping
+  - **projection_manifest.py**: The explicit `projection_manifest.json` completion record
 - **optimizer.py**: Experimental auto-alignment using image registration techniques
 - **create_envelopes.m**: MATLAB function to create brain surface envelopes from pial surfaces
 

@@ -15,6 +15,7 @@ import yaml
 from tqdm import tqdm
 
 from util.photo_registration import register_photo_set
+from util.projection_manifest import PROJECTION_MANIFEST_FILENAME, projection_set_is_complete
 
 def load_config(config_path=os.path.join(os.path.dirname(__file__), "config.yaml")):
     """
@@ -66,8 +67,15 @@ def load_config(config_path=os.path.join(os.path.dirname(__file__), "config.yaml
 
 def main_slicer_loop(mri_data_dir, photo_data_dir, slicer_executable, patient_dir_regex="RESP*", reprocess=False, process_only_photo=False):
     """
-    Open each patient in 3D Slicer for manual photo to MRI registration.
-    
+    Open each patient in 3D Slicer for photo-to-cortex projection.
+
+    For every patient, this discovers the photo set (one reference photo, zero
+    or more auxiliary photos, and an optional post-resection photo), draws the
+    required masks, registers auxiliary photos into the reference-photo grid,
+    and opens 3D Slicer for manual reference-to-cortex alignment. The workflow
+    endpoint is a complete set of photo-to-cortex projections (see
+    `projection_manifest.json`); a volumetric resection mask remains optional.
+
     Parameters
     ----------
     mri_data_dir : str
@@ -79,7 +87,7 @@ def main_slicer_loop(mri_data_dir, photo_data_dir, slicer_executable, patient_di
     patient_dir_regex : str, optional
         Glob pattern for patient directories. Defaults to "RESP*"
     reprocess : bool, optional
-        If True, reprocess patients even if resection mask already exists. Defaults to False
+        If True, reprocess patients even if their photo-projection set is already complete. Defaults to False
     """
 
     # Get patient dirs
@@ -104,10 +112,9 @@ def main_slicer_loop(mri_data_dir, photo_data_dir, slicer_executable, patient_di
         brain_envelope = os.path.join(patient_dir, "brain_envelope.stl")
         mask_path = os.path.join(output_dir, f"{patient_id}_photo_masks.npz")
         figure_path = os.path.join(output_dir, f"{patient_id}_photo_with_masks.png")
-        resection_mask_path = os.path.join(output_dir, f"photo2cortex_resection_mask.nii.gz")
-        atlas_based_flag_path = os.path.join(output_dir, "atlas_based.txt")
         skip_flag_path = os.path.join(output_dir, "skip.txt")
         photo_set_manifest_path = os.path.join(output_dir, "photo_set_manifest.json")
+        projection_manifest_path = os.path.join(output_dir, PROJECTION_MANIFEST_FILENAME)
 
         tqdm.write(f"\n====== {patient_id}: Start processing ======\n")
 
@@ -193,6 +200,14 @@ def main_slicer_loop(mri_data_dir, photo_data_dir, slicer_executable, patient_di
             f"Photo-to-reference registration completed for {sum(result.status == 'registered' for result in registration_results)} "
             f"of {len(registration_results)} selected secondary photo(s)."
         )
+        pending_photos = [
+            result.moving_photo_id for result in registration_results if result.status != "registered"
+        ]
+        if pending_photos:
+            tqdm.write(
+                f"Registration pending/failed for: {', '.join(pending_photos)}. "
+                "These photos will not receive a projected envelope until registered."
+            )
         photo_preparation.save_photo_set_manifest(photo_set, photo_set_manifest_path)
 
         if not masks_drawn:
@@ -216,17 +231,11 @@ def main_slicer_loop(mri_data_dir, photo_data_dir, slicer_executable, patient_di
             continue
 
         # Skip conditions
-        if os.path.exists(resection_mask_path) and not reprocess:
-            tqdm.write(f"Resection mask already exists for {patient_id}, skipping patient.")
-            continue
-        if os.path.exists(atlas_based_flag_path) and not reprocess:
-            tqdm.write(f"Atlas-based resection mask flagged for {patient_id}, skipping patient.")
-            continue
         if os.path.exists(skip_flag_path) and not reprocess:
             tqdm.write(f"Skip flag found for {patient_id}, skipping patient.")
             continue
-        if os.path.exists(os.path.join(output_dir, "brain_envelope.vtk")) and not reprocess:
-            tqdm.write(f"Registration already done for {patient_id}, skipping patient.")
+        if projection_set_is_complete(projection_manifest_path, photo_set_manifest_path) and not reprocess:
+            tqdm.write(f"Photo-projection set already complete for {patient_id}, skipping patient.")
             continue
 
         # When processing, show the reference photo to help with manual alignment
