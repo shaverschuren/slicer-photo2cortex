@@ -17,7 +17,10 @@ no such dependency and remains importable from a plain Python environment (e.g.
 __all__ = []
 
 try:  # pragma: no cover - only available inside 3D Slicer
-    from .io import save_scene_to_directory, create_envelopes, load_stl_surface, write_stl_surface, load_photo_volume
+    from .io import (
+        save_scene_to_directory, create_envelopes, load_stl_surface, write_stl_surface,
+        load_photo_volume, validate_single_slice_photo_volume
+    )
     from .geometry import (
         vtkMatrixToNumpy, numpyToVtkMatrix, extractRotationScale, rotationFromVectors,
         get_poly_normals, subdivide_model, sample_scalar_along_normals,
@@ -36,6 +39,7 @@ else:
     __all__ += [
         # I/O
         'save_scene_to_directory', 'create_envelopes', 'load_stl_surface', 'write_stl_surface', 'load_photo_volume',
+        'validate_single_slice_photo_volume',
         # Geometry
         'vtkMatrixToNumpy', 'numpyToVtkMatrix', 'extractRotationScale', 'rotationFromVectors',
         'get_poly_normals', 'subdivide_model', 'sample_scalar_along_normals',

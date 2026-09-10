@@ -7,6 +7,7 @@ import vtk  # type: ignore
 from vtkmodules.util import numpy_support  # type: ignore
 import slicer  # type: ignore
 from .geometry import subdivide_model
+from .io import validate_single_slice_photo_volume
 
 
 def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, height=120.0, opacity=0.6):
@@ -54,6 +55,7 @@ def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, 
 
     # Texture assignment:
     # keep only the first image slice; photo projection uses a 2D texture.
+    validate_single_slice_photo_volume(photoVolumeNode)
     imageData = photoVolumeNode.GetImageData()
     imageExtent = imageData.GetExtent()
     extract = vtk.vtkExtractVOI()
@@ -179,8 +181,15 @@ class Projection:
         )
 
         # Load image volume
+        validate_single_slice_photo_volume(self.photoVolumeNode)
         arr = slicer.util.arrayFromVolume(self.photoVolumeNode)
         if arr.ndim == 4:
+            if arr.shape[0] != 1:
+                raise RuntimeError(
+                    f"Photo volume '{self.photoVolumeNode.GetName()}' has an unexpected "
+                    f"multi-slice array shape {arr.shape} (first axis > 1); expected exactly "
+                    "one Z slice."
+                )
             arr = arr[0]
         if arr.ndim == 3 and arr.shape[-1] == 1:
             arr = np.repeat(arr, 3, axis=-1)

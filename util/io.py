@@ -57,19 +57,48 @@ def load_stl_surface(stl_path, modelNodeName):
     return modelNode
 
 
+def validate_single_slice_photo_volume(volumeNode, path=None):
+    """Raise if a photograph volume node was loaded as a multi-slice (image series) volume.
+
+    Slicer's generic volume loader can silently group similarly-named image files
+    from the same directory into one multi-slice volume (`vtkITKArchetypeImageSeriesReader`).
+    Every photograph handled by this application must be a single 2D RGB image, so
+    a multi-slice result is treated as a hard error rather than falling back to slice 0.
+    """
+    imageData = volumeNode.GetImageData() if volumeNode is not None else None
+    if imageData is None:
+        raise RuntimeError(
+            f"Photo volume '{volumeNode.GetName() if volumeNode else '?'}' "
+            f"(path={path}) has no image data."
+        )
+    dims = imageData.GetDimensions()
+    if dims[2] != 1:
+        raise RuntimeError(
+            f"Photo volume '{volumeNode.GetName()}' (path={path}) unexpectedly loaded as a "
+            f"multi-slice volume with dimensions {dims} (z={dims[2]}). This usually means "
+            "Slicer grouped multiple similarly-named files in the same directory into an "
+            "image series; ensure load_photo_volume() uses single-file loading."
+        )
+    return dims
+
+
 def load_photo_volume(path, node_name=None):
     """Load a photograph file as a Slicer scalar volume node (used as a projection texture source).
 
     Used for the reference photo as well as auxiliary/post-resection photos once
     they are expressed in the reference-photo pixel grid.
+
+    Loads the file explicitly as a single file so that Slicer never groups other
+    similarly-named images in the same directory into a multi-slice image series.
     """
     if not path or not os.path.exists(path):
         raise FileNotFoundError(f"Photo image not found: {path}")
-    volumeNode = slicer.util.loadVolume(path)
+    volumeNode = slicer.util.loadVolume(path, {"singleFile": True})
     if not volumeNode:
         raise RuntimeError(f"Failed to load photo image as volume: {path}")
     if node_name:
         volumeNode.SetName(node_name)
+    validate_single_slice_photo_volume(volumeNode, path=path)
     return volumeNode
 
 

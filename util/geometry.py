@@ -270,10 +270,15 @@ def load_photo_masks(mask_path, photoVolumeNode,
     vtk_array = imageData.GetPointData().GetScalars()
     np_array = numpy_support.vtk_to_numpy(vtk_array)
 
+    if dims[2] != 1:
+        raise RuntimeError(
+            f"[Mask] photoVolumeNode '{photoVolumeNode.GetName()}' has {dims[2]} Z slices "
+            f"(dims={dims}); expected exactly 1. This indicates the photo was loaded as a "
+            "multi-slice image series instead of a single image."
+        )
+
     # Reshape properly: (z, y, x, comps)
     arr = np_array.reshape((dims[2], dims[1], dims[0], comps))
-    if dims[2] > 1:
-        print(f"[Mask] Multi-slice photo (z={dims[2]}), applying to first slice only.")
     img = arr[0]  # (y, x, comps)
 
     if resection_mask.shape != (dims[1], dims[0]):
