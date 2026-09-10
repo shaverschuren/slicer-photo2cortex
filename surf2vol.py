@@ -1,10 +1,10 @@
 """Module to project a color-coded surface mask into a grey matter volume along surface normals within Slicer-Python."""
 
 import numpy as np
-import slicer
-import vtk
-from vtkmodules.util import numpy_support
-from scipy.ndimage import binary_closing
+import slicer  # type: ignore
+import vtk  # type: ignore
+from vtkmodules.util import numpy_support  # type: ignore
+from scipy.ndimage import binary_closing  # type: ignore
 
 def project_surface_to_volume_mask(surfaceNode, ribbonVolumeNode, max_depth_mm=20.0, include_wm=True,
                                    target_rgb=(1,128,1), gm_labels=[3, 42], wm_labels=[2, 41],

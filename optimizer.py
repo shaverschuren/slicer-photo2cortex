@@ -1,8 +1,8 @@
 import math
 import numpy as np
-import vtk
-from vtkmodules.util import numpy_support
-import slicer
+import vtk  # type: ignore
+from vtkmodules.util import numpy_support  # type: ignore
+import slicer  # type: ignore
 import util
 from scipy import ndimage as ndi
 from scipy import optimize
