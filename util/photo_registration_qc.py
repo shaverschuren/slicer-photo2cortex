@@ -239,6 +239,8 @@ def review_registration_qc(montage_path: str, photo_set: Any, registration_resul
     decision = {"value": "aborted"}
 
     def _set_decision(value: str) -> None:
+        if decision["value"] != "aborted":
+            return
         decision["value"] = value
         plt.close(fig)
 
