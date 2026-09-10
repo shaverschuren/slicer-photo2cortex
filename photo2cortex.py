@@ -237,6 +237,7 @@ def process_subject(
         masks_drawn = True
     reference_photo.masks["path"] = mask_path
 
+    tqdm.write("Starting photo-to-photo registration...")
     registration_dir = os.path.join(output_dir, "registered_photos")
     registration_results = register_photo_set(photo_set, registration_dir, dof=6)
     tqdm.write(

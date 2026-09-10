@@ -19,7 +19,7 @@ import numpy as np
 from photo_preparation import PatientPhotoSet
 
 
-REGISTRATION_ALGORITHM_VERSION = "masked_ecc_v1"
+REGISTRATION_ALGORITHM_VERSION = "opencv2_masked_ecc"
 DEFAULT_REGISTRATION_DOF = 6
 ECC_MOTION_BY_DOF = {2: "MOTION_TRANSLATION", 3: "MOTION_EUCLIDEAN", 6: "MOTION_AFFINE", 8: "MOTION_HOMOGRAPHY"}
 ECC_INITIAL_ROTATIONS_DEG = (0, 45, 90, 135, 180, 225, 270, 315)
@@ -88,7 +88,7 @@ def _method_from_dof(dof: int) -> PhotoRegistrationMethod:
 def _dof_from_method(method: Any) -> int:
     return {
         PhotoRegistrationMethod.RIGID_3DOF: 3,
-        PhotoRegistrationMethod.SIMILARITY_4DOF: DEFAULT_REGISTRATION_DOF,
+        PhotoRegistrationMethod.SIMILARITY_4DOF: 6,
         PhotoRegistrationMethod.AFFINE_6DOF: 6,
         PhotoRegistrationMethod.PROJECTIVE_8DOF: 8,
     }[_normalise_registration_method(method)]
@@ -183,7 +183,7 @@ def _coarse_shape(shape: Tuple[int, ...]) -> Tuple[int, int]:
 
 
 def initial_warp_for_dof(dof: int, moving_shape: Tuple[int, ...], reference_shape: Tuple[int, ...], moving_centre: Any, reference_centre: Any, rotation_deg: float = 0.0) -> np.ndarray:
-    """Create a coarse moving-to-reference ECC initialization."""
+    """Create a coarse moving-to-reference initialization in project convention."""
     import cv2
     value = validate_registration_dof(dof)
     moving_centre = np.asarray(moving_centre, dtype=np.float64)
@@ -198,6 +198,17 @@ def initial_warp_for_dof(dof: int, moving_shape: Tuple[int, ...], reference_shap
     return np.vstack([matrix, [0.0, 0.0, 1.0]]).astype(np.float32) if value == 8 else matrix
 
 
+def invert_transform(transform: Any) -> np.ndarray:
+    """Invert an affine or projective transform, preserving its input shape."""
+    matrix = np.asarray(transform, dtype=np.float64)
+    if matrix.shape == (2, 3):
+        homogeneous = np.vstack([matrix, [0.0, 0.0, 1.0]])
+        return np.linalg.inv(homogeneous)[:2, :].astype(np.float32)
+    if matrix.shape == (3, 3):
+        return np.linalg.inv(matrix).astype(np.float32)
+    raise ValueError(f"Transform must have shape (2, 3) or (3, 3); got {matrix.shape}.")
+
+
 def _prepare_ecc_image(image: np.ndarray, roi: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     import cv2
     width, height = _coarse_shape(image.shape)
@@ -210,6 +221,12 @@ def _prepare_ecc_image(image: np.ndarray, roi: np.ndarray) -> Tuple[np.ndarray, 
 
 
 def _to_full_resolution_transform(coarse_transform: np.ndarray, moving_shape: Tuple[int, ...], reference_shape: Tuple[int, ...]) -> np.ndarray:
+    """Lift a coarse moving-to-reference transform into full-resolution coordinates.
+
+    With ``x_coarse = S @ x_full`` and ``x_reference_coarse = H_coarse @
+    x_moving_coarse``, the project-convention full-resolution transform is
+    ``H_full = inv(S_reference) @ H_coarse @ S_moving``.
+    """
     moving_width, moving_height = _coarse_shape(moving_shape)
     reference_width, reference_height = _coarse_shape(reference_shape)
     moving_scale = np.diag([moving_width / moving_shape[1], moving_height / moving_shape[0], 1.0])
@@ -252,11 +269,19 @@ def _validate_ecc_transform(transform: np.ndarray, moving_shape: Tuple[int, ...]
 
 
 def _ecc_with_mask(template: np.ndarray, moving: np.ndarray, template_mask: np.ndarray, moving_mask: np.ndarray, warp: np.ndarray, motion_type: int) -> Tuple[float, np.ndarray]:
+    """Run ECC while keeping the public warp convention moving-to-reference.
+
+    OpenCV's ECC warp maps template/reference coordinates to moving coordinates.
+    Convert on both sides of this boundary so callers only handle the project's
+    secondary-to-reference convention.
+    """
     import cv2
     if not hasattr(cv2, "findTransformECCWithMask"):
         raise RuntimeError("This OpenCV build does not provide findTransformECCWithMask.")
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, ECC_MAX_ITERATIONS, ECC_EPSILON)
-    return cv2.findTransformECCWithMask(template, moving, template_mask, moving_mask, warp, motion_type, criteria, ECC_GAUSS_FILTER_SIZE)
+    ecc_warp = invert_transform(warp)
+    score, ecc_warp = cv2.findTransformECCWithMask(template, moving, template_mask, moving_mask, ecc_warp, motion_type, criteria, ECC_GAUSS_FILTER_SIZE)
+    return score, invert_transform(ecc_warp)
 
 
 def _load_registration_images(moving_photo: Any, reference_photo: Any) -> Tuple[Any, Any, str, str]:
@@ -297,17 +322,17 @@ def register_ecc(moving_photo: Any, reference_photo: Any, *, dof: int = DEFAULT_
             score, coarse_transform = _ecc_with_mask(reference_gray, moving_gray, reference_mask, moving_mask, initial, ecc_motion_type(dof))
             transform = _to_full_resolution_transform(coarse_transform, moving_image.shape, reference_image.shape)
             diagnostics = _validate_ecc_transform(transform, moving_image.shape, reference_image.shape, moving_roi, reference_roi, dof)
-            candidates.append({"initial_rotation_deg": angle, "ecc_score": float(score), "converged": True, **diagnostics, "transform": transform})
-        except (cv2.error, ValueError, RuntimeError) as exc:
-            candidates.append({"initial_rotation_deg": angle, "converged": False, "error": str(exc)})
-    valid_candidates = [candidate for candidate in candidates if candidate.get("converged") and candidate.get("valid")]
+            candidates.append({"initial_rotation_deg": angle, "ecc_score": float(score), "converged": True, "ecc_succeeded": True, **diagnostics, "transform": transform})
+        except (cv2.error, ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+            candidates.append({"initial_rotation_deg": angle, "converged": False, "ecc_succeeded": False, "error": str(exc)})
+    valid_candidates = [candidate for candidate in candidates if candidate.get("ecc_succeeded") and candidate.get("valid")]
     if not valid_candidates:
         raise ValueError(f"ECC registration failed: none of {len(candidates)} initialization angles converged to a geometrically valid transform.")
     best = max(valid_candidates, key=lambda candidate: candidate["ecc_score"])
     transform = best["transform"]
     registered_image = cv2.warpPerspective(moving_image, transform, (reference_image.shape[1], reference_image.shape[0]), flags=cv2.INTER_LINEAR)
     metadata = {key: value for key, value in best.items() if key not in {"transform", "valid", "error"}}
-    metadata.update({"backend": "opencv_ecc", "dof": dof, "motion_type": ECC_MOTION_BY_DOF[dof], "initialization_candidates": len(candidates), "converged_candidates": sum(candidate.get("converged", False) for candidate in candidates), "valid_candidates": len(valid_candidates), "gauss_filter_size": ECC_GAUSS_FILTER_SIZE, "max_iterations": ECC_MAX_ITERATIONS, "epsilon": ECC_EPSILON, "algorithm_version": REGISTRATION_ALGORITHM_VERSION, "candidate_summary": [{key: candidate.get(key) for key in ("initial_rotation_deg", "ecc_score", "converged", "valid")} for candidate in candidates]})
+    metadata.update({"backend": "opencv_ecc", "dof": dof, "motion_type": ECC_MOTION_BY_DOF[dof], "initialization_candidates": len(candidates), "converged_candidates": sum(candidate.get("ecc_succeeded", False) for candidate in candidates), "valid_candidates": len(valid_candidates), "gauss_filter_size": ECC_GAUSS_FILTER_SIZE, "max_iterations": ECC_MAX_ITERATIONS, "epsilon": ECC_EPSILON, "algorithm_version": REGISTRATION_ALGORITHM_VERSION, "candidate_summary": [{key: candidate.get(key) for key in ("initial_rotation_deg", "ecc_score", "converged", "ecc_succeeded", "valid")} for candidate in candidates], "convergence_note": "converged means ECC returned successfully; OpenCV does not expose whether termination was caused by epsilon or max_iterations."})
     result = PhotoRegistrationResult(str(getattr(reference_photo, "photo_id", reference_path)), str(getattr(moving_photo, "photo_id", moving_path)), _method_from_dof(dof), source_image_path=moving_path, reference_image_path=reference_path, source_dimensions=(moving_image.shape[1], moving_image.shape[0]), reference_dimensions=(reference_image.shape[1], reference_image.shape[0]), transform=transform.tolist(), metadata=metadata)
     output_path = kwargs.get("output_path")
     if output_path:

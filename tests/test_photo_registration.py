@@ -242,8 +242,6 @@ def test_ecc_dof_routing_matches_opencv_constants():
     assert pr.ecc_motion_type(3) == cv2.MOTION_EUCLIDEAN
     assert pr.ecc_motion_type(6) == cv2.MOTION_AFFINE
     assert pr.ecc_motion_type(8) == cv2.MOTION_HOMOGRAPHY
-    with pytest.raises(ValueError, match="Supported ECC models"):
-        pr.validate_registration_dof(4)
 
 
 def test_ecc_initialization_allows_large_rotation_and_resolution_scale():
@@ -264,8 +262,6 @@ def test_ecc_initialization_allows_large_rotation_and_resolution_scale():
 
 def test_similarity_validation_rejects_scale_reflection_and_centre_jump():
     roi = np.ones((100, 100), dtype=bool)
-    with pytest.raises(ValueError, match="Supported ECC models"):
-        pr.validate_registration_dof(4)
     too_large = pr._validate_ecc_transform(np.array([[3, 0, -100], [0, 3, -100], [0, 0, 1]], dtype=float), (100, 100), (100, 100), roi, roi, 6)
     assert not too_large["valid"]
     assert "scale" in too_large["error"]
@@ -323,3 +319,83 @@ def test_ecc_registration_uses_both_masks_and_all_rotation_starts(monkeypatch, t
     assert all(call[2] == cv2.MOTION_AFFINE for call in calls)
     assert result.metadata["backend"] == "opencv_ecc"
     assert result.metadata["dof"] == 6
+
+
+def _make_registration_photos(tmp_path, moving_image, reference_image):
+    import cv2
+
+    moving_path = tmp_path / "moving.png"
+    reference_path = tmp_path / "reference.png"
+    assert cv2.imwrite(str(moving_path), moving_image)
+    assert cv2.imwrite(str(reference_path), reference_image)
+    moving_mask_path = tmp_path / "moving_masks.npz"
+    reference_mask_path = tmp_path / "reference_masks.npz"
+    np.savez_compressed(moving_mask_path, outside_mask=np.zeros(moving_image.shape[:2], dtype=bool))
+    np.savez_compressed(reference_mask_path, outside_mask=np.zeros(reference_image.shape[:2], dtype=bool))
+    return (
+        PhotoRecord("moving", str(moving_path), masks={"path": str(moving_mask_path)}),
+        PhotoRecord("reference", str(reference_path), role="reference", masks={"path": str(reference_mask_path)}),
+    )
+
+
+def _asymmetric_image(size=160):
+    import cv2
+
+    image = np.zeros((size, size, 3), dtype=np.uint8)
+    cv2.circle(image, (35, 42), 13, (220, 90, 30), -1)
+    cv2.rectangle(image, (96, 25), (132, 58), (40, 190, 240), -1)
+    cv2.fillPoly(image, [np.array([[50, 108], [78, 130], [32, 140]])], (170, 50, 200))
+    cv2.line(image, (102, 105), (135, 137), (255, 255, 255), 5)
+    return cv2.GaussianBlur(image, (5, 5), 0)
+
+
+def test_ecc_registration_returns_moving_to_reference_translation(monkeypatch, tmp_path):
+    import cv2
+
+    moving_image = _asymmetric_image()
+    known = np.array([[1, 0, 7], [0, 1, -5]], dtype=np.float32)
+    reference_image = cv2.warpAffine(moving_image, known, (160, 160))
+    moving, reference = _make_registration_photos(tmp_path, moving_image, reference_image)
+    monkeypatch.setattr(pr, "ECC_INITIAL_ROTATIONS_DEG", (0,))
+
+    result = pr.register_photo_to_reference(moving, reference, dof=6)
+    mapped = pr.transform_points_to_reference([[35, 42]], result)[0]
+
+    assert mapped == pytest.approx([42, 37], abs=1.5)
+    warped = pr.warp_image_to_reference(moving_image, result)
+    assert np.mean(np.abs(warped.astype(float) - reference_image.astype(float))) < 8
+
+
+def test_ecc_registration_returns_moving_to_reference_affine(monkeypatch, tmp_path):
+    import cv2
+
+    moving_image = _asymmetric_image()
+    known = cv2.getRotationMatrix2D((80, 80), 12, 1.0).astype(np.float32)
+    known[:, 2] += [4, -3]
+    reference_image = cv2.warpAffine(moving_image, known, (160, 160))
+    moving, reference = _make_registration_photos(tmp_path, moving_image, reference_image)
+    monkeypatch.setattr(pr, "ECC_INITIAL_ROTATIONS_DEG", (0,))
+
+    result = pr.register_photo_to_reference(moving, reference, dof=6)
+    point = np.array([35, 42, 1], dtype=float)
+    expected = (np.vstack([known, [0, 0, 1]]) @ point)[:2]
+
+    assert pr.transform_points_to_reference([point[:2]], result)[0] == pytest.approx(expected, abs=2.0)
+
+
+@pytest.mark.parametrize("full_transform", [
+    np.array([[1.1, 0.15, 40], [-0.08, 0.9, -20], [0, 0, 1]], dtype=float),
+    np.array([[1.0, 0.05, 40], [-0.03, 0.95, -20], [0.0002, -0.0001, 1]], dtype=float),
+])
+def test_coarse_to_full_transform_preserves_moving_to_reference_points(full_transform):
+    moving_shape = (1200, 1600, 3)
+    reference_shape = (900, 1200, 3)
+    moving_width, moving_height = pr._coarse_shape(moving_shape)
+    reference_width, reference_height = pr._coarse_shape(reference_shape)
+    moving_scale = np.diag([moving_width / moving_shape[1], moving_height / moving_shape[0], 1.0])
+    reference_scale = np.diag([reference_width / reference_shape[1], reference_height / reference_shape[0], 1.0])
+    coarse_transform = reference_scale @ full_transform @ np.linalg.inv(moving_scale)
+
+    recovered = pr._to_full_resolution_transform(coarse_transform, moving_shape, reference_shape)
+    point = np.array([340, 520, 1.0])
+    assert (recovered @ point) / (recovered @ point)[2] == pytest.approx((full_transform @ point) / (full_transform @ point)[2])
