@@ -3,10 +3,80 @@ Photo projection onto 3D surfaces for 3D Slicer.
 """
 
 import numpy as np
-import vtk
-from vtkmodules.util import numpy_support
-import slicer
+import vtk  # type: ignore
+from vtkmodules.util import numpy_support  # type: ignore
+import slicer  # type: ignore
 from .geometry import subdivide_model
+
+
+def create_textured_plane(photoVolumeNode, planeName="PhotoPlane", width=120.0, height=120.0, opacity=0.6):
+    """
+    Create a plane model which will receive the photograph as a texture.
+
+    Parameters
+    ----------
+    photoVolumeNode : vtkMRMLScalarVolumeNode
+        Volume node containing the photograph data
+    planeName : str, optional
+        Name for the created plane model. Defaults to "PhotoPlane"
+    width : float, optional
+        Width of the plane in mm. Defaults to 120.0
+    height : float, optional
+        Height of the plane in mm. Defaults to 120.0
+    opacity : float, optional
+        Opacity of the textured plane (0.0 to 1.0). Defaults to 0.6
+
+    Returns
+    -------
+    tuple
+        (planeNode, texture_pipeline) - The model node and retained VTK
+        (extract-first-slice, flip-vertically) texture pipeline
+    """
+    # Create vtkPlaneSource
+    plane = vtk.vtkPlaneSource()
+    plane.SetOrigin(-width/2.0, -height/2.0, 0.0)
+    plane.SetPoint1(width/2.0, -height/2.0, 0.0)
+    plane.SetPoint2(-width/2.0, height/2.0, 0.0)
+    plane.SetXResolution(1)
+    plane.SetYResolution(1)
+    plane.Update()
+
+    # Add as model node
+    planeNode = slicer.modules.models.logic().AddModel(plane.GetOutputPort())
+    planeNode.SetName(planeName)
+
+    # Make semi-transparent
+    displayNode = planeNode.GetModelDisplayNode()
+    displayNode.SetOpacity(opacity)
+    displayNode.SetBackfaceCulling(False)
+    displayNode.SetSelectable(True)
+    displayNode.SetVisibility(False)
+
+    # Texture assignment:
+    # keep only the first image slice; photo projection uses a 2D texture.
+    imageData = photoVolumeNode.GetImageData()
+    imageExtent = imageData.GetExtent()
+    extract = vtk.vtkExtractVOI()
+    extract.SetInputConnection(photoVolumeNode.GetImageDataConnection())
+    extract.SetVOI(
+        imageExtent[0], imageExtent[1], imageExtent[2], imageExtent[3],
+        imageExtent[4], imageExtent[4]
+    )
+    extract.Update()
+
+    # Flip image vertically (needed for correct orientation)
+    flip = vtk.vtkImageFlip()
+    flip.SetFilteredAxis(1)  # flip vertical axis
+    flip.SetInputConnection(extract.GetOutputPort())
+    flip.Update()
+
+    # Connect the flipped image pipeline to model display as texture
+    displayNode.SetTextureImageDataConnection(flip.GetOutputPort())
+
+    # Naming note: the texture is referenced via the display node's connection (not saved as separate node)
+    print("Created textured plane:", planeNode.GetName(), " (texture connected)")
+
+    return planeNode, (extract, flip)
 
 
 class Projection:
@@ -14,6 +84,12 @@ class Projection:
     Handles projection of a 2D photo volume onto a 3D model surface in 3D Slicer.
     Supports orthographic and perspective projection and automatically updates when
     the associated transform changes.
+
+    Projective geometry is owned by the reference-photo coordinate system: the
+    plane, transform, camera model, slab thickness, and cortex mapping define the
+    shared reference-grid geometry. Secondary photographs can later be warped into
+    the same reference grid and sampled through this same projection without
+    creating independent 3D transforms.
 
     Usage:
         proj = Projection(
@@ -124,6 +200,18 @@ class Projection:
     # -------------------------------------------------------------------------
     # Core projection logic
     # -------------------------------------------------------------------------
+    def set_reference_image(self, photoVolumeNode):
+        """Bind a different reference-grid image to the existing geometry.
+
+        This keeps the same plane transform and cortex projection geometry while
+        allowing another image already expressed in the reference-photo coordinate
+        system to be sampled. The actual math remains the same as the original
+        photo→cortex projection.
+        """
+        self.photoVolumeNode = photoVolumeNode
+        self._prepare_data()
+        self.update()
+
     def _update_projection(self, caller=None, event=None):
         """Observer callback."""
         self.update()

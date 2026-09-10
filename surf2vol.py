@@ -1,3 +1,5 @@
+"""Module to project a color-coded surface mask into a grey matter volume along surface normals within Slicer-Python."""
+
 import numpy as np
 import slicer
 import vtk
@@ -135,7 +137,7 @@ def project_surface_to_volume_mask(surfaceNode, ribbonVolumeNode, max_depth_mm=2
     labelNode.CopyOrientation(ribbonVolumeNode)
 
     # Create segmentation node + display node
-    segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "pic2mri_resection_mask")
+    segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "photo2cortex_resection_mask")
     segmentationNode.CreateDefaultDisplayNodes()
     # Import the labelmap volume into the segmentation
     slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelNode, segmentationNode)

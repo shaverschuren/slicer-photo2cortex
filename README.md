@@ -1,13 +1,48 @@
 # Slicer Photo2Cortex
 
-Utilities and scripts for streamlined manual registration of intraoperative resection photographs to MRI-derived cortical models in 3D Slicer.
+Utilities and scripts for manual registration of intraoperative photographs to MRI-derived cortical models in 3D Slicer.
 
 ## Overview
 
-This package provides helper functions and automation scripts to facilitate the registration of intraoperative resection photographs to preoperative MRI scans. It leverages FreeSurfer surfaces, 3D Slicer's visualization capabilities, and MATLAB for envelope creation to enable precise spatial mapping of surgical photographs to brain anatomy.
+The core concept is a single reference photo per patient:
+
+```text
+                      secondary photo A
+                             |
+                             | 2D registration
+                             v
+MRI / FreeSurfer <---- reference photograph <---- secondary photo B
+       ^                    |
+       |                    |
+       +--- photo→cortex ---+
+```
+
+The reference photograph is the one manually aligned to the cortex. Every secondary photograph is first mapped into the reference-photo pixel coordinate system and then reuses the same reference-photo→cortex geometry.
+
+This architecture explicitly separates:
+
+- reference photo → cortex registration (manual, one per patient)
+- secondary photo → reference photo registration (masked OpenCV ECC registration by default)
+- optimizer.py, which remains a future reference-photo→cortex optimisation tool and is not the same as 2D photo-to-photo registration
+
+The workflow endpoint is a **complete set of photo-to-cortex projections** — one projected brain-envelope model per selected photograph, all sharing the exact same reference-photo→cortex geometry (see `photo2cortex_output/projection_manifest.json`). A volumetric post-resection mask remains an optional extra, not the primary output:
+
+```
+photo selection
+  -> masking (outside ROI for every photo; resection ROI only for a post-resection photo)
+  -> auxiliary-to-reference 2D registration
+  -> registration QC montage + explicit human approval
+  -> one manual reference-to-cortex registration
+  -> projection of all photos (one persistent projected envelope each)
+  -> optional post-resection surf2vol
+```
+
+Registration QC is persisted in the per-photo manifest state. Unchanged cached registrations keep their prior approval; newly computed results are marked as `pending` again until the user explicitly approves or rejects them.
 
 ### Key Features
 
+- **Reference-photo-first workflow**: exactly one photo defines the cortex geometry
+- **Secondary-photo routing**: secondary photos are registered into the reference-photo grid before cortex projection
 - **FreeSurfer Integration**: Surface IO and envelope handling for cortical models
 - **Interactive Photo Alignment**: Manual registration tools in 3D Slicer with transform controls
 - **Surface-to-Volume Projection**: Convert surface masks into volumetric representations
@@ -54,8 +89,8 @@ Additional dependencies (installed automatically when needed):
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/shaverschuren/res_pic2mri.git
-   cd res_pic2mri
+  git clone https://github.com/shaverschuren/slicer-photo2cortex.git
+  cd slicer-photo2cortex
    ```
 
 2. **Install Python dependencies**:
@@ -77,19 +112,25 @@ Additional dependencies (installed automatically when needed):
 Before running the scripts, you need to configure the paths to your data and software:
 
 1. **Copy the configuration template**:
-   - The first time you run `main_slicer_loop.py`, it will create a `config.yaml` file
+  - The first time you run `photo2cortex.py`, it will create a `config.yaml` file
    - Alternatively, copy `config_template.yaml` to `config.yaml`
 
 2. **Edit `config.yaml`** with your system paths:
    ```yaml
    slicer_exe_path: C:\Path\To\Slicer.exe
-   mri_data_dir: C:\Path\To\FreeSurfer\Subjects\Directory
-   pic_data_dir: C:\Path\To\Photographs\Root\Directory
+   photo_data_dir: C:\Path\To\Photographs\Root\Directory
+   batch:
+     mri_data_dir: C:\Path\To\FreeSurfer\Subjects\Directory
+     subject_dir_regex: RESP*
+     reprocess: false
+     process_only_photo: false
+     process_only_envelope: false
    ```
 
    - `slicer_exe_path`: Full path to the Slicer executable
-   - `mri_data_dir`: Root directory containing FreeSurfer subject folders (e.g., `RESP001`, `RESP002`, etc.)
-   - `pic_data_dir`: Root directory containing corresponding photograph folders
+  - `photo_data_dir`: Root directory containing corresponding photograph folders
+  - `batch.mri_data_dir`: Root directory containing FreeSurfer subject folders (e.g., `RESP0001`, `RESP0002`, etc.)
+  - `batch.subject_dir_regex`: Pattern used to discover batch subjects
 
 ## Usage
 
@@ -97,43 +138,94 @@ Before running the scripts, you need to configure the paths to your data and sof
 
 The typical workflow consists of two main steps:
 
-1. **Pre-compute Surface Envelopes** (Optional but Recommended):
+1. **Run the workflow**:
    ```python
-   python fs_envelope_loop.py
+  python photo2cortex.py
    ```
-   This pre-generates envelope STL files for all patients. Without this step, envelopes are created on-the-fly, adding ~30 seconds per patient.
+  This opens 3D Slicer for each subject to perform manual photo-to-MRI registration.
 
-2. **Run Manual Registration Loop**:
-   ```python
-   python main_slicer_loop.py
-   ```
-   This opens 3D Slicer for each patient to perform manual photo-to-MRI registration.
+  Processing modes are controlled in `config.yaml`: set
+  `batch.process_only_envelope: true` to generate only FreeSurfer envelopes,
+  `batch.process_only_photo: true` to prepare photographs without opening
+  Slicer, or `batch.reprocess: true` to rerun subjects that would be skipped.
+  The envelope-only setting precomputes the surface files used by photo registration.
+
+  ### Batch processing
+
+  ```bash
+  python photo2cortex.py
+  ```
+
+  Processes subjects matching the batch configuration in `config.yaml`.
+
+  ### Single-subject processing
+
+  ```bash
+  python photo2cortex.py /path/to/RESP0123
+  ```
+
+  Processes only the supplied FreeSurfer subject directory. The subject does not
+  need to live underneath the configured batch MRI directory.
+
+### Photo set / reference workflow
+
+A patient may contain several images, but one photo is designated as the reference photo. It is the only photograph manually aligned to the cortical surface. Secondary photographs are not independently registered to cortex; instead they are mapped into the reference-photo image grid using a 2D transform, and then the same photo→cortex projection is reused.
+
+A patient photo set may be represented by a manifest such as:
+
+```yaml
+reference: pre_resection
+
+photos:
+  - id: pre_resection
+    path: pre_resection.jpg
+    role: reference
+
+  - id: grid_configuration_2
+    path: grid2.jpg
+    role: secondary
+    registration_dof: 8
+
+  - id: post_resection
+    path: post_resection.jpg
+    role: secondary
+    registration_method: nonlinear
+```
+
+If a patient contains exactly one usable photograph and no manifest, that single photo is automatically treated as the reference photograph. If multiple photos are present and no reference is specified, the workflow stops with a clear error instead of guessing.
+
+Registration uses the source-space `outside_mask` and optional `resection_mask`
+as separate ECC masks; only intact exposed cortex contributes to optimization.
+The automatic model is masked OpenCV ECC with 6-DOF affine motion, free
+rotation, multi-start initialization, overlap checks, and affine geometry
+sanity checks. Supported explicit models are 2, 3, 6, and 8 DOF via
+`registration_dof`.
+
+Cached registrations include algorithm, image, and source-mask fingerprints.
+Older feature-based cached results without this provenance are recomputed.
+Legacy `registration_method` values remain readable, but new results persist
+ECC backend and integer DOF provenance.
 
 ### Detailed Workflow
 
 #### Step 1: Envelope Generation (Optional)
 
-Run this first to save time during the main registration process:
+Set `batch.process_only_envelope: true` in `config.yaml`, then run:
 
 ```python
-python fs_envelope_loop.py
+python photo2cortex.py
 ```
 
-This script:
-- Scans for FreeSurfer patient directories (matching `RESP*` pattern)
-- Opens Slicer in no-main-window mode for each patient
-- Calls MATLAB's `create_envelopes.m` to generate:
-  - `lh_envelope.stl` - Left hemisphere envelope
-  - `rh_envelope.stl` - Right hemisphere envelope  
-  - `brain_envelope.stl` - Whole brain envelope
-- Skips patients that already have envelopes
+This generates `lh_envelope.stl`, `rh_envelope.stl`, and `brain_envelope.stl`
+for configured subjects. Existing envelopes are skipped unless
+`batch.reprocess: true` is enabled.
 
 #### Step 2: Photo Registration
 
 Run the main registration loop:
 
 ```python
-python main_slicer_loop.py
+python photo2cortex.py
 ```
 
 This script:
@@ -155,13 +247,29 @@ This script:
 
 When Slicer opens for each patient:
 
-1. **View Setup**: The scene loads with MRI, surfaces, and the photo plane
-2. **Transform Control**: Use Slicer's transform widget to align the photo:
+1. **View Setup**: The scene loads with MRI, surfaces, and the reference photo's plane. Only the reference photograph gets an interactively-manipulated plane and transform; auxiliary and post-resection photos never get an independent 3D alignment.
+2. **Transform Control**: Use Slicer's transform widget to align the reference photo:
    - Translate (move position)
    - Rotate (adjust orientation)
    - The photo appears as a textured plane in 3D space
-3. **Volumetric Mask Creation**: Project the now-aligned surface mask to the underlying brain volume
-4. **Export**: Save scene and volumetric resection mask
+3. **Finalise projections**: Press `f` to freeze the current reference-to-cortex geometry and materialise a persistent projected brain-envelope model for every selected, successfully-registered photograph (`ProjectedEnvelope__<photo_id>`). Pressing `f` again updates the existing projections in place rather than duplicating them.
+4. **Optional volumetric mask**: If a post-resection photo was selected, press `v` to project its resection marking into a volumetric mask via `surf2vol` (requires `f` to have been pressed first). If no post-resection photo exists, `v` is a no-op that prints an informative message.
+5. **Export**: Press `s` to save the Slicer scene (as a Slicer Data Bundle) and write `photo2cortex_output/projection_manifest.json`, the explicit completion record used by the outer loop. `s` warns (and requires a second press to proceed) if `f` has not been pressed yet in this session.
+
+Keyboard shortcuts:
+
+| Key | Action |
+| --- | --- |
+| `1` / `2` | Switch to 3D view / red slice view |
+| `space` | Center camera on the reference projection plane |
+| `Return` | Snap the reference plane to the surface point under the current camera |
+| `a` | Experimental auto-align (not stable) |
+| `f` | Finalise the reference alignment and project every selected photo |
+| `s` | Save the scene and projection manifest (warns if `f` has not been pressed) |
+| `v` | Optional post-resection-only volumetric resection mask |
+| `q` | Quit (warns once if the projection set has not been saved) |
+| `x` | Mark as atlas-based (optional resection metadata) and quit |
+| `Escape` | Quit and break the outer patient loop |
 
 ### Advanced: Auto-Alignment (Experimental)
 
@@ -177,13 +285,12 @@ import optimizer
 ## Project Structure
 
 ```
-res_pic2mri/
+photo2cortex/
 ├── __init__.py                 # Package initialization and documentation
 ├── config_template.yaml        # Configuration template
-├── main_slicer_loop.py        # Main entry point for registration workflow
-├── fs_envelope_loop.py        # Pre-compute envelopes for all patients
+├── photo2cortex.py            # Main entry point for registration workflow
 ├── slicer_script.py           # Slicer automation script (runs inside Slicer)
-├── process_photograph.py      # Photo preprocessing and file handling
+├── photo_preparation.py      # Photo preprocessing and file handling
 ├── surf2vol.py                # Surface-to-volume projection utilities
 ├── optimizer.py               # Auto-alignment optimization (experimental)
 ├── util/                      # Utility package with specialized modules
@@ -191,7 +298,10 @@ res_pic2mri/
 │   ├── io.py                  # Scene and file I/O operations
 │   ├── geometry.py            # Geometry and matrix utilities
 │   ├── projection.py          # Photo projection onto surfaces
-│   └── interaction.py         # UI, camera, and interaction handling
+│   ├── interaction.py         # UI, camera, and interaction handling
+│   ├── photo_state.py         # PhotoProjectionState (plane/envelope/projection per photo)
+│   ├── photo_registration.py  # Photo-to-reference registration + mask warping
+│   └── projection_manifest.py # Explicit photo-projection completion record
 ├── MATLAB/
 │   └── create_envelopes.m     # MATLAB script for envelope creation
 └── .gitignore                 # Git ignore rules
@@ -199,16 +309,18 @@ res_pic2mri/
 
 ### Module Descriptions
 
-- **main_slicer_loop.py**: Orchestrates the batch processing workflow, loading configuration and iterating through patients
-- **fs_envelope_loop.py**: Standalone script to pre-generate surface envelopes
+- **photo2cortex.py**: Orchestrates batch and single-subject processing
 - **slicer_script.py**: Executed inside Slicer's Python environment to set up the registration scene
-- **process_photograph.py**: Handles photograph file discovery, copying, and preprocessing
+- **photo_preparation.py**: Handles photograph file discovery, copying, and preprocessing
 - **surf2vol.py**: Converts FreeSurfer surface masks to volumetric representations
 - **util/**: Utility package containing specialized modules:
   - **io.py**: Scene and file I/O operations, STL handling, envelope creation
   - **geometry.py**: Matrix conversions, rotation utilities, VTK polydata operations
   - **projection.py**: Photo projection onto 3D surfaces with perspective/orthographic support
-  - **interaction.py**: UI widgets, camera controls, and interactive transform handling
+  - **interaction.py**: UI widgets, camera controls, interactive transform handling, and finalise/save
+  - **photo_state.py**: `PhotoProjectionState`, the per-photo plane/envelope/projection bookkeeping
+  - **photo_registration.py**: Auxiliary-to-reference registration and mask warping
+  - **projection_manifest.py**: The explicit `projection_manifest.json` completion record
 - **optimizer.py**: Experimental auto-alignment using image registration techniques
 - **create_envelopes.m**: MATLAB function to create brain surface envelopes from pial surfaces
 
@@ -220,7 +332,7 @@ Your FreeSurfer subjects should be organized as:
 
 ```
 mri_data_dir/
-├── RESP001/
+├── RESP0001/
 │   ├── mri/
 │   │   └── T1.nii
 │   └── surf/
@@ -229,7 +341,7 @@ mri_data_dir/
 │       ├── lh_envelope.stl (generated)
 │       ├── rh_envelope.stl (generated)
 │       └── brain_envelope.stl (generated)
-├── RESP002/
+├── RESP0002/
 │   └── ...
 └── ...
 ```
@@ -237,10 +349,10 @@ mri_data_dir/
 Photographs should be organized with matching patient IDs:
 
 ```
-pic_data_dir/
-├── RESP001/
+photo_data_dir/
+├── RESP0001/
 │   └── photo.jpg (or similar)
-├── RESP002/
+├── RESP0002/
 │   └── photo.jpg
 └── ...
 ```
@@ -253,7 +365,7 @@ pic_data_dir/
   
 ### Performance Tips
 
-- **Pre-compute Envelopes**: Run `fs_envelope_loop.py` first to avoid 30-second delays per patient
+- **Pre-compute Envelopes**: Set `batch.process_only_envelope: true` and run `photo2cortex.py` to avoid 30-second delays per patient
 - **Batch Processing**: The scripts are designed for batch processing; configure all paths once and process multiple patients efficiently
 
 ### Platform Notes

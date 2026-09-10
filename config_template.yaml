@@ -1,3 +1,9 @@
 slicer_exe_path: C:\\Path\\To\\Slicer.exe
-mri_data_dir: C:\\Path\\To\\MRI\\Data\\Directory
-pic_data_dir: C:\\Path\\To\\Photograph\\Data\\Directory
+photo_data_dir: C:\\Path\\To\\Photograph\\Data\\Directory
+batch:
+	mri_data_dir: C:\\Path\\To\\FreeSurfer\\Subjects
+	subject_dir_regex: RESP*
+	reprocess: false
+	process_only_photo: false
+	process_only_envelope: false
+  process_only_envelope: false
