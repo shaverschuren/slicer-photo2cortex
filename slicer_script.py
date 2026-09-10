@@ -27,9 +27,16 @@ import argparse
 import slicer  # type: ignore
 import numpy as np
 import vtk  # type: ignore
-import nibabel as nib
+
+try:
+    import nibabel as nib
+    from NiBabelModelIO import VolGeom  # type: ignore
+except ImportError:
+    slicer.util.pip_install("nibabel")
+    import nibabel as nib
+    from NiBabelModelIO import VolGeom  # type: ignore
+
 import util
-from NiBabelModelIO import VolGeom  # type: ignore
 
 
 def load_photo_set_manifest(photo_set_manifest_path):
